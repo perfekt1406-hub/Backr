@@ -30,14 +30,24 @@ pub struct HostProjectRow {
     pub name: String,
     pub snapshot_count: usize,
     pub last_backup_at: Option<DateTime<Utc>>,
+    /// Newest snapshot directory names (up to three), sorted newest-first.
+    pub recent_snapshots: Vec<String>,
 }
 
-/// Volume summary for [`HostDashboardView`] chrome (`df` best-effort).
+/// Volume summary for [`HostDashboardView`] chrome (`df` best-effort; describes the whole filesystem).
 #[derive(Debug, Serialize)]
 pub struct HostVolumeSummary {
     pub backup_root: String,
     pub bytes_avail: Option<u64>,
     pub bytes_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filesystem_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_point: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<String>,
 }
 
 /// Chooses laptop setup vs client vs NAS-local dashboard before SPA routing completes.
@@ -67,6 +77,11 @@ pub fn resolve_shell_bootstrap() -> Result<ShellBootstrap, String> {
     }
 }
 
+/// Lists snapshot subdirectory names for `project_path`, newest valid snapshot names first.
+///
+/// # Returns
+///
+/// Sorted folder names with parseable snapshot timestamps, newest lexicographic/timestamp order first.
 fn snapshot_dirs(project_path: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(project_path) else {
         return Vec::new();
@@ -101,18 +116,70 @@ pub fn host_list_snapshot_projects(backup_root: String) -> Result<Vec<HostProjec
     for name in names {
         let project_path = base.join(&name);
         let snaps = snapshot_dirs(&project_path);
-        let last = snaps.first().and_then(|s| parse_snapshot_timestamp(s));
+        let snapshot_count = snaps.len();
+        let last_backup_at = snaps.first().and_then(|s| parse_snapshot_timestamp(s));
+        let recent_snapshots = snaps.into_iter().take(3).collect();
         out.push(HostProjectRow {
             name,
-            snapshot_count: snaps.len(),
-            last_backup_at: last,
+            snapshot_count,
+            last_backup_at,
+            recent_snapshots,
         });
     }
 
     Ok(out)
 }
 
-/// Parses `df -B1` for the filesystem backing `backup_root`.
+/// Parses GNU `df --output=source,target,avail,size,used,pcent` data row when six columns are present.
+///
+/// # Inputs
+///
+/// * `line` — non-header whitespace-separated row from `df -B1`.
+///
+/// # Returns
+///
+/// Tuple of device, mount point, avail/size/used bytes, and percent-used token if parsing succeeds.
+fn parse_df_full_row(line: &str) -> Option<(String, String, u64, u64, u64, String)> {
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 6 {
+        return None;
+    }
+    let filesystem_source = cols.first()?.to_string();
+    let mount_point = cols.get(1)?.to_string();
+    let bytes_avail = cols.get(2)?.parse().ok()?;
+    let bytes_size = cols.get(3)?.parse().ok()?;
+    let used_bytes = cols.get(4)?.parse().ok()?;
+    let used_percent = cols.get(5)?.to_string();
+    Some((
+        filesystem_source,
+        mount_point,
+        bytes_avail,
+        bytes_size,
+        used_bytes,
+        used_percent,
+    ))
+}
+
+/// Parses legacy two-column `df --output=avail,size` row.
+///
+/// # Returns
+///
+/// `(bytes_avail, bytes_size)` with missing values as `None`.
+fn parse_df_legacy_row(line: &str) -> (Option<u64>, Option<u64>) {
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 2 {
+        return (None, None);
+    }
+    let avail = cols.first().and_then(|s| s.parse().ok());
+    let size = cols.get(1).and_then(|s| s.parse().ok());
+    (avail, size)
+}
+
+/// Builds [`HostVolumeSummary`] by probing `df` against `backup_root`, preferring GNU `--output` enrichments.
+///
+/// # Inputs
+///
+/// * `backup_root` — path whose containing filesystem should be queried (may be file or directory).
 #[tauri::command]
 pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, String> {
     let path = Path::new(&backup_root);
@@ -120,30 +187,85 @@ pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, Str
         return Err(format!("backup_root does not exist: {}", backup_root));
     }
 
-    let out = Command::new("df")
+    let enriched = Command::new("df")
+        .args([
+            "-B1",
+            "--output=source,target,avail,size,used,pcent",
+            backup_root.as_str(),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if enriched.status.success() {
+        let text = String::from_utf8_lossy(&enriched.stdout);
+        let mut lines = text.lines();
+        lines.next(); // header
+        let line = lines.next().unwrap_or("");
+        if let Some((filesystem_source, mount_point, bytes_avail, bytes_size, used_bytes, used_percent)) =
+            parse_df_full_row(line)
+        {
+            return Ok(HostVolumeSummary {
+                backup_root,
+                bytes_avail: Some(bytes_avail),
+                bytes_size: Some(bytes_size),
+                filesystem_source: Some(filesystem_source),
+                mount_point: Some(mount_point),
+                used_bytes: Some(used_bytes),
+                used_percent: Some(used_percent),
+            });
+        }
+    }
+
+    let legacy = Command::new("df")
         .args(["-B1", "--output=avail,size", backup_root.as_str()])
         .output()
         .map_err(|e| e.to_string())?;
 
-    if !out.status.success() {
+    if !legacy.status.success() {
         return Ok(HostVolumeSummary {
             backup_root,
             bytes_avail: None,
             bytes_size: None,
+            filesystem_source: None,
+            mount_point: None,
+            used_bytes: None,
+            used_percent: None,
         });
     }
 
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = String::from_utf8_lossy(&legacy.stdout);
     let mut lines = text.lines();
-    lines.next(); // header
+    lines.next();
     let line = lines.next().unwrap_or("");
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    let avail = cols.first().and_then(|s| s.parse::<u64>().ok());
-    let size = cols.get(1).and_then(|s| s.parse::<u64>().ok());
+    let (bytes_avail, bytes_size) = parse_df_legacy_row(line);
 
     Ok(HostVolumeSummary {
         backup_root,
-        bytes_avail: avail,
-        bytes_size: size,
+        bytes_avail,
+        bytes_size,
+        filesystem_source: None,
+        mount_point: None,
+        used_bytes: None,
+        used_percent: None,
     })
+}
+
+/// Runs `du`-backed disk inventory off the async runtime to avoid blocking the UI thread.
+///
+/// # Inputs
+///
+/// * `backup_root` — backup tree root to scan.
+/// * `force_refresh` — bypass TTL and attempt a fresh `du` pass when true.
+///
+/// External: `tauri::async_runtime::spawn_blocking` schedules [`crate::host_disk_inventory::host_disk_inventory_impl`].
+#[tauri::command]
+pub async fn host_disk_inventory(
+    backup_root: String,
+    force_refresh: bool,
+) -> Result<crate::host_disk_inventory::HostDiskInventory, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::host_disk_inventory::host_disk_inventory_impl(backup_root, force_refresh)
+    })
+    .await
+    .map_err(|e| format!("disk inventory task failed: {e}"))?
 }

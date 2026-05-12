@@ -9,6 +9,7 @@ pub mod config_cmd;
 pub mod host_cmd;
 pub mod project_cmd;
 pub mod snapshot_cmd;
+pub mod system_cmd;
 
 pub use activity_cmd::get_activity_series;
 pub use backup_cmd::{execute_backup_cycle_with_sink, spawn_backup_job};
@@ -19,5 +20,6 @@ pub use snapshot_cmd::{
     list_files, list_snapshots, read_snapshot_file, restore_all_projects, restore_all_snapshots,
     restore_snapshot,
 };
+pub use system_cmd::get_system_info;
 
 pub use backup_cmd::run_backup;

@@ -6,10 +6,12 @@
   import { HardDrive, FolderGit2, Radar, Settings2 } from "lucide-svelte";
   import { link } from "svelte-spa-router";
 
+  import { switchDevDashboard, devShellToggleEnabled } from "../../lib/devShellDashboard";
   import { shellKind } from "../../stores/shell";
   import { useDevMock } from "../../lib/useDevMock";
 
   const devMockActive = useDevMock();
+  const devDashToggle = devShellToggleEnabled();
 </script>
 
 <aside
@@ -23,6 +25,35 @@
       <span class="font-semibold uppercase tracking-[0.12em]">Dev mock data</span>
       — IPC bypassed; rsync lines are synthetic.
       <span class="mt-1 block text-[10px] text-[var(--muted2)]">npm run dev:mock · localStorage backr-dev-mock=1</span>
+      {#if devDashToggle}
+        <div class="mt-3 border-t border-[var(--border2)] pt-3">
+          <p class="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
+            Dev dashboard
+          </p>
+          <div class="flex gap-1 rounded-[5px] border border-[var(--border)] bg-[var(--bg3)] p-0.5">
+            <button
+              type="button"
+              class="flex-1 rounded-[4px] px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] transition-colors"
+              class:bg-[var(--bg4)]={$shellKind !== "host"}
+              class:text-[var(--text)]={$shellKind !== "host"}
+              class:text-[var(--muted)]={$shellKind === "host"}
+              onclick={() => switchDevDashboard("client")}
+            >
+              Client
+            </button>
+            <button
+              type="button"
+              class="flex-1 rounded-[4px] px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] transition-colors"
+              class:bg-[var(--bg4)]={$shellKind === "host"}
+              class:text-[var(--text)]={$shellKind === "host"}
+              class:text-[var(--muted)]={$shellKind !== "host"}
+              onclick={() => switchDevDashboard("host")}
+            >
+              Host
+            </button>
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
   <div class="flex items-start gap-3">

@@ -4,16 +4,26 @@
  */
 
 import type { ActivityPoint } from "../../types/activity";
-import type { HostProjectRow, HostVolumeSummary } from "../../types/hostDashboard";
+import type {
+  HostDiskInventory,
+  HostProjectRow,
+  HostVolumeSummary,
+} from "../../types/hostDashboard";
 import type { Config } from "../../types/config";
 import type { BackupStatus, ProjectInfo } from "../../types/project";
 import type { ShellBootstrap } from "../../types/shellBootstrap";
+import type { SystemInfo } from "../../types/systemInfo";
 import type {
   FileEntry,
   SnapshotEntry,
   SnapshotFileContents,
   RestoreEveryProjectRow,
 } from "../../types/snapshot";
+import {
+  DEV_MOCK_HOST_BACKUP_ROOT,
+  DEV_MOCK_HOST_SSH_USER,
+  getDevShellKindPreference,
+} from "../devShellPreference";
 import { emitMockProgressLine } from "../mockProgressSink";
 import {
   createInitialMockConfig,
@@ -228,6 +238,19 @@ export async function mockGetActivitySeries(): Promise<ActivityPoint[]> {
   return structuredClone(activityHistory);
 }
 
+/** Fake [`SystemInfo`] for dashboard chrome when IPC is mocked in the browser. */
+export async function mockGetSystemInfo(): Promise<SystemInfo> {
+  await delay(35);
+  return {
+    hostname: "mock-workstation",
+    os_pretty: "Linux (mock dev browser)",
+    kernel_release: "6.12.x-generic",
+    arch: "x86_64",
+    user: "dev",
+    sampled_at_rfc3339: new Date().toISOString(),
+  };
+}
+
 /**
  * Mock bootstrap — browser dev mock always behaves as a configured laptop client.
  *
@@ -235,19 +258,72 @@ export async function mockGetActivitySeries(): Promise<ActivityPoint[]> {
  */
 export async function mockResolveShellBootstrap(): Promise<ShellBootstrap> {
   await delay(15);
+  if (getDevShellKindPreference() === "host") {
+    return {
+      mode: "host",
+      backup_root: DEV_MOCK_HOST_BACKUP_ROOT,
+      ssh_user: DEV_MOCK_HOST_SSH_USER,
+    };
+  }
   return { mode: "client" };
 }
 
 /**
- * Mock empty host tree — host dashboard is exercised via real Tauri / backup servers.
+ * Synthetic NAS snapshot folders aligned with [`MOCK_PROJECT_ROWS`] names where snapshots exist.
+ *
+ * External: reads snapshot name fixtures so browsing mocks stay consistent.
  */
 export async function mockHostListSnapshotProjects(): Promise<HostProjectRow[]> {
   await delay(30);
-  return [];
+  const orderedSnaps = [...MOCK_SNAPSHOT_NAMES].sort((a, b) => b.localeCompare(a));
+  const recentForCount = (n: number): string[] =>
+    n <= 0 ? [] : orderedSnaps.slice(0, Math.min(3, orderedSnaps.length));
+  return MOCK_PROJECT_ROWS.map((p) => ({
+    name: p.name,
+    snapshot_count: p.snapshot_count,
+    last_backup_at: p.last_backup_at,
+    recent_snapshots: recentForCount(p.snapshot_count),
+  }));
 }
 
-/** Mock volume summary with unknown sizes (no `df` in browser). */
+/** Synthetic volume telemetry mirroring enriched GNU `df` fields for UI previews (browser has no real `df`). */
 export async function mockHostVolumeSummary(backupRoot: string): Promise<HostVolumeSummary> {
   await delay(15);
-  return { backup_root: backupRoot, bytes_avail: null, bytes_size: null };
+  const bytes_size = 5_000_000_000_000;
+  const bytes_avail = 480_000_000_000;
+  const used = bytes_size - bytes_avail;
+  return {
+    backup_root: backupRoot,
+    bytes_avail,
+    bytes_size,
+    filesystem_source: "/dev/md127",
+    mount_point: "/srv/backr-host",
+    used_bytes: used,
+    used_percent: `${Math.round((used / bytes_size) * 100)}%`,
+  };
+}
+
+/**
+ * Synthetic `du` inventory totals sized roughly against dashboard rows that carry snapshots.
+ *
+ * External: when `forceRefresh` is true, uses a longer delay to mimic rescan latency.
+ */
+export async function mockHostDiskInventory(
+  backupRoot: string,
+  forceRefresh: boolean,
+): Promise<HostDiskInventory> {
+  await delay(forceRefresh ? 280 : 50);
+  const sized = MOCK_PROJECT_ROWS.filter((p) => p.snapshot_count > 0).map((p, i) => ({
+    name: p.name,
+    bytes: (i + 1) * 1_234_567_890,
+  }));
+  const sumProjects = sized.reduce((acc, row) => acc + row.bytes, 0);
+  const overhead = Math.round(sumProjects * 0.02);
+  return {
+    backup_root: backupRoot,
+    backup_root_bytes: sumProjects + overhead,
+    projects: sized,
+    from_cache: !forceRefresh,
+    scanned_at: new Date().toISOString(),
+  };
 }

@@ -5,8 +5,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "dev:mock": "VITE_BACKR_MOCK=1 vite",
+    "dev": "vite --open",
+    "dev:mock": "VITE_BACKR_MOCK=1 vite --open",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",

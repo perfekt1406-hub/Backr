@@ -10,9 +10,16 @@
   import ErrorToast from "./components/shared/ErrorToast.svelte";
   import SidebarNav from "./components/layout/SidebarNav.svelte";
   import { listenBackupProgress } from "./lib/events";
+  import {
+    DEV_MOCK_HOST_BACKUP_ROOT,
+    DEV_MOCK_HOST_SSH_USER,
+    devShellToggleEnabled,
+    getDevShellKindPreference,
+  } from "./lib/devShellPreference";
   import { getConfig, resolveShellBootstrap } from "./lib/commands";
   import { registerMockProgressAppender } from "./lib/mockProgressSink";
   import routes from "./routes";
+  import type { ShellBootstrap } from "./types/shellBootstrap";
   import { appendProgressLine } from "./stores/backup";
   import { hostDashboardRoot, hostSshUser, shellKind } from "./stores/shell";
 
@@ -58,12 +65,22 @@
     void (async () => {
       try {
         const bootstrap = await resolveShellBootstrap();
-        if (bootstrap.mode === "host") {
+
+        let boot: ShellBootstrap = bootstrap;
+        if (devShellToggleEnabled() && getDevShellKindPreference() === "host") {
+          boot = {
+            mode: "host",
+            backup_root: DEV_MOCK_HOST_BACKUP_ROOT,
+            ssh_user: DEV_MOCK_HOST_SSH_USER,
+          };
+        }
+
+        if (boot.mode === "host") {
           shellKind.set("host");
-          hostDashboardRoot.set(bootstrap.backup_root);
-          hostSshUser.set(bootstrap.ssh_user ?? null);
+          hostDashboardRoot.set(boot.backup_root);
+          hostSshUser.set(boot.ssh_user ?? null);
           routeForBootstrap("host", false);
-        } else if (bootstrap.mode === "setup") {
+        } else if (boot.mode === "setup") {
           shellKind.set("setup");
           hostDashboardRoot.set(null);
           hostSshUser.set(null);

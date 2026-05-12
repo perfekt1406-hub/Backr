@@ -9,8 +9,11 @@
 
   import { Layers } from "lucide-svelte";
 
+  import ActivityLineChart from "./ActivityLineChart.svelte";
   import ActivityStrip from "./ActivityStrip.svelte";
   import BackupNowButton from "./BackupNowButton.svelte";
+  import DashboardSummaryCards from "./DashboardSummaryCards.svelte";
+  import DashboardSystemInfo from "./DashboardSystemInfo.svelte";
   import ProjectListItem from "./ProjectListItem.svelte";
   import StatusBadge from "../shared/StatusBadge.svelte";
   import {
@@ -19,6 +22,7 @@
     progressLog,
     refreshBackupStatus,
   } from "../../stores/backup";
+  import { loadConfig } from "../../stores/config";
   import { refreshProjects, refreshProjectsRemote, projects } from "../../stores/projects";
   import { shellKind } from "../../stores/shell";
   import * as commands from "../../lib/commands";
@@ -29,6 +33,7 @@
       replace("/host");
       return;
     }
+    void loadConfig();
     void refreshProjects();
     void refreshBackupStatus();
     const id = window.setInterval(() => void refreshBackupStatus(), 5000);
@@ -71,31 +76,42 @@
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col gap-8 px-10 py-10">
-  <header class="flex flex-wrap items-start justify-between gap-6 border-b border-[var(--border)] pb-6">
-    <div>
-      <p class="label-caps mb-2 text-[var(--muted)]">Overview</p>
-      <h1 class="text-2xl font-semibold tracking-tight text-[var(--text)]">Projects & backup</h1>
-      <p class="mt-2 max-w-xl text-[13px] text-[var(--muted2)]">
-        Snapshot stats load from <strong class="font-semibold text-[var(--text)]">your Mac</strong> — last
-        counts from successful backups or when you sync while on the same network as the backup server.
-        Scheduler and manual backups still use SSH when you run them.
-      </p>
-    </div>
-    <div class="flex flex-col items-end gap-3">
-      <StatusBadge active={busy} detail={$backupStatus?.active_project ?? null} />
-      <BackupNowButton {busy} />
-      {#if $backupStatus}
-        <div class="text-right text-[11px] uppercase tracking-[0.14em] text-[var(--muted)]">
-          <div>Last run {relativeFromIso($backupStatus.last_backup_at)}</div>
-          <div class="text-[var(--muted2)]">
-            Next window {relativeFromIso($backupStatus.next_backup_at)}
-          </div>
+  <header class="border-b border-[var(--border)] pb-6">
+    <!-- One row: title stack (left) · summary tiles (center) · status + backup (right). -->
+    <div
+      class="flex min-w-0 w-full flex-nowrap items-stretch gap-4 overflow-x-auto md:gap-6 xl:gap-8"
+    >
+      <div class="min-w-0 flex-1">
+        <p class="label-caps mb-2 text-[var(--muted)] md:mb-3">Overview</p>
+        <h1
+          class="max-w-[22rem] text-3xl font-semibold leading-[1.12] tracking-tight text-[var(--text)] md:max-w-xl md:text-4xl lg:text-5xl lg:leading-[1.08]"
+        >
+          Projects backup
+        </h1>
+      </div>
+
+      <div class="flex shrink-0 self-stretch">
+        <DashboardSummaryCards />
+      </div>
+
+      <div class="flex min-w-[11rem] shrink-0 flex-col items-end gap-3 self-start">
+        <div class="flex flex-wrap items-center justify-end gap-3">
+          <StatusBadge active={busy} detail={$backupStatus?.active_project ?? null} />
+          <BackupNowButton {busy} />
         </div>
-      {/if}
+        {#if $backupStatus}
+          <div class="text-right text-[11px] uppercase tracking-[0.14em] text-[var(--muted)]">
+            <div>Last run {relativeFromIso($backupStatus.last_backup_at)}</div>
+            <div class="text-[var(--muted2)]">
+              Next window {relativeFromIso($backupStatus.next_backup_at)}
+            </div>
+          </div>
+        {/if}
+      </div>
     </div>
   </header>
 
-  <div class="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+  <div class="grid min-h-0 flex-1 gap-6 lg:grid-cols-[1.15fr_0.85fr]">
     <section class="flex flex-col gap-4">
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
         <h2 class="label-caps shrink-0 text-[var(--muted)]">Projects</h2>
@@ -141,13 +157,13 @@
       </div>
     </section>
 
-    <div class="flex min-h-0 flex-col gap-6">
+    <div class="flex min-h-0 flex-col gap-6 lg:min-h-[min(80vh,720px)]">
       <ActivityStrip />
 
       <section
-        class="flex min-h-[220px] flex-col rounded-[8px] border border-[var(--border)] bg-[var(--bg2)] panel-plate"
+        class="flex min-h-[200px] shrink-0 flex-col rounded-[8px] border border-[var(--border)] bg-[var(--bg3)] panel-plate lg:max-h-[min(40vh,320px)] lg:min-h-0 lg:flex-1"
       >
-        <div class="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+        <div class="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <span class="label-caps text-[var(--muted)]">Rsync console</span>
           <button
             type="button"
@@ -158,13 +174,17 @@
           </button>
         </div>
         <pre
-          class="max-h-[320px] flex-1 overflow-auto whitespace-pre-wrap break-all px-4 py-3 font-mono text-[11px] leading-relaxed text-[var(--muted2)]"
+          class="min-h-[140px] flex-1 overflow-auto whitespace-pre-wrap break-all px-4 py-3 font-mono text-[11px] leading-relaxed text-[var(--muted2)]"
         >{#if $progressLog.length === 0}<span class="text-[var(--muted)]"
             >Awaiting backup events…</span
           >{:else}{#each $progressLog as line}
 {line}
 {/each}{/if}</pre>
       </section>
+
+      <DashboardSystemInfo />
+
+      <ActivityLineChart />
     </div>
   </div>
 </div>

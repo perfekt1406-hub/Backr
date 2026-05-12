@@ -9,8 +9,13 @@ import type { ActivityPoint } from "../types/activity";
 import type { BackupStatus, ProjectInfo } from "../types/project";
 import type { Config } from "../types/config";
 import type { FileEntry, SnapshotEntry, SnapshotFileContents, RestoreEveryProjectRow } from "../types/snapshot";
-import type { HostProjectRow, HostVolumeSummary } from "../types/hostDashboard";
+import type {
+  HostDiskInventory,
+  HostProjectRow,
+  HostVolumeSummary,
+} from "../types/hostDashboard";
 import type { ShellBootstrap } from "../types/shellBootstrap";
+import type { SystemInfo } from "../types/systemInfo";
 import * as devMockBackend from "./devMock/backend";
 import { useDevMock } from "./useDevMock";
 
@@ -51,6 +56,26 @@ export async function hostVolumeSummary(backupRoot: string): Promise<HostVolumeS
 }
 
 /**
+ * Measures backup-tree directory sizes via `du` with TTL JSON cache under `~/.config/backr/host_du_cache.json`.
+ *
+ * External: `invoke` → `host_disk_inventory`; long scans run in a blocking worker on the Rust side.
+ *
+ * @param forceRefresh When true, ignores cache TTL and attempts a fresh scan (still falls back to stale cache if `du` fails).
+ */
+export async function hostDiskInventory(
+  backupRoot: string,
+  forceRefresh = false,
+): Promise<HostDiskInventory> {
+  if (useDevMock()) {
+    return devMockBackend.mockHostDiskInventory(backupRoot, forceRefresh);
+  }
+  return invoke<HostDiskInventory>("host_disk_inventory", {
+    backupRoot,
+    forceRefresh,
+  });
+}
+
+/**
  * Loads persisted configuration from managed state (null before first save).
  *
  * External: `invoke` dispatches to Rust `get_config` returning `Option<Config>`.
@@ -60,6 +85,18 @@ export async function getConfig(): Promise<Config | null> {
     return devMockBackend.mockGetConfig();
   }
   return invoke<Config | null>("get_config");
+}
+
+/**
+ * Reads hostname, distro/OS label, kernel, architecture, user, and sample clock from this machine.
+ *
+ * External: `invoke` → `get_system_info`.
+ */
+export async function getSystemInfo(): Promise<SystemInfo> {
+  if (useDevMock()) {
+    return devMockBackend.mockGetSystemInfo();
+  }
+  return invoke<SystemInfo>("get_system_info");
 }
 
 /**

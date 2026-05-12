@@ -29,7 +29,7 @@
 </script>
 
 <section
-  class="rounded-[8px] border border-[var(--border)] bg-[var(--bg3)] px-5 py-4 panel-plate"
+  class="rounded-[8px] border border-[var(--border)] bg-[var(--bg2)] px-5 py-4 panel-plate"
 >
   <div class="mb-3 flex items-center gap-2">
     <Activity size={16} class="text-[var(--accent)]" aria-hidden="true" />
