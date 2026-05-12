@@ -78,13 +78,15 @@ Installable bundles are produced under `src-tauri/target/release/bundle/` accord
 
 ### 4. Optional: prepare machines with helper scripts
 
-On the **backup server** (Linux), create a dedicated user, backup root, and SSH layout:
+On a **fresh Linux install**, these scripts detect **apt**, **dnf**, **yum** (Amazon Linux 2), **pacman**, **zypper**, or **apk** and install missing **OpenSSH** / **rsync** packages (the backup-host script also enables **sshd** and drops in **PubkeyAuthentication yes**). You still need **sudo** on the client when packages are missing.
+
+On the **backup server** (Linux):
 
 ```bash
 sudo ./scripts/setup-backup-host.sh --help
 ```
 
-On the **machine that runs Backr**, verify `ssh`/`rsync`, ensure your projects directory exists, and optionally generate an SSH key:
+On the **machine that runs Backr** (Linux desktop):
 
 ```bash
 ./scripts/setup-connecting-client.sh --help
@@ -125,7 +127,7 @@ SSH host keys for backup connections are tracked in `~/.config/backr/known_hosts
 |------|------|
 | `src/` | Svelte 5 UI, routes, stores, and TypeScript command wrappers. |
 | `src-tauri/` | Rust crate: config, scheduler, tray, rsync/SSH backup, Tauri commands. |
-| `scripts/` | Optional bash helpers for host and client setup. |
+| `scripts/` | Host/client setup scripts plus `scripts/lib/` (distro-aware package helpers). |
 
 UI design notes can live in `brand-aesthetic.md` locally (that filename is gitignored). A deeper technical plan and remote snapshot layout are documented in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md).
 

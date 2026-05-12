@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Purpose: Prepare a Linux backup host (NAS, home server, or spare laptop) to store Backr snapshots.
-# Role: Creates a dedicated UNIX user, backup root directory, and ~/.ssh layout for pubkey-only SSH.
+# Role: Installs OpenSSH server + rsync when missing, enables sshd, drops in PubkeyAuthentication yes,
+#       then creates a dedicated UNIX user, backup root directory, and ~/.ssh layout for pubkey SSH.
 #
 # Run with sudo on the machine that will receive rsync over SSH. Non-Linux hosts are not supported here.
 #
@@ -15,6 +16,11 @@
 #   -h, --help        Show this text.
 
 set -euo pipefail
+
+_BACKR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# External: `source` loads `backr_install_server_ssh_rsync` and `backr_sshd_ensure_pubkey_auth`.
+# shellcheck source=lib/linux_pkg_install.inc.sh
+source "${_BACKR_SCRIPT_DIR}/lib/linux_pkg_install.inc.sh"
 
 BACKR_USER="${BACKR_USER:-backr}"
 BACKR_ROOT="${BACKR_ROOT:-/srv/backr}"
@@ -111,12 +117,10 @@ print_sshd_hints() {
   cat <<EOF
 
 Next steps on this machine:
-  1. Install / enable SSH if needed, e.g. on Debian/Ubuntu:
-       sudo apt-get update && sudo apt-get install -y openssh-server
-       sudo systemctl enable --now ssh
-  2. In /etc/ssh/sshd_config ensure pubkey auth is allowed:
-       PubkeyAuthentication yes
-     Then: sudo systemctl reload ssh  (or sshd)
+  1. OpenSSH server, rsync, and PubkeyAuthentication=yes have been applied when this script was not run with --dry-run.
+  2. If you change /etc/ssh/sshd_config later, reload sshd:
+       systemctl reload ssh    # Debian/Ubuntu (unit may be ssh.service)
+       systemctl reload sshd   # Fedora/Arch
   3. From each laptop, install your public key, e.g.:
        ssh-copy-id -i ~/.ssh/id_ed25519.pub ${BACKR_USER}@$(hostname -f 2>/dev/null || hostname -s)
 
@@ -136,6 +140,8 @@ main() {
   parse_args "$@"
   require_linux_root
   normalize_root
+  backr_install_server_ssh_rsync "$DRY_RUN"
+  backr_sshd_ensure_pubkey_auth "$DRY_RUN"
   ensure_user_exists
   ensure_backup_tree
   ensure_ssh_dir

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Purpose: Prepare a laptop (or workstation) that runs the Backr app to push backups over SSH/rsync.
-# Role: Verifies local tools, ensures a projects directory exists, and optionally creates an SSH key pair.
+# Purpose: Prepare a Linux laptop (or workstation) that runs the Backr app to push backups over SSH/rsync.
+# Role: Installs OpenSSH client + rsync when missing (apt/dnf/yum/pacman/zypper/apk, using sudo), ensures a
+#       projects directory exists, and optionally creates an SSH key pair.
 #
 # Usage:
 #   ./scripts/setup-connecting-client.sh [options]
@@ -12,6 +13,11 @@
 #   -h, --help            Show this text.
 
 set -euo pipefail
+
+_BACKR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# External: `source` loads `backr_install_client_ssh_rsync` and related helpers (see file header there).
+# shellcheck source=lib/linux_pkg_install.inc.sh
+source "${_BACKR_SCRIPT_DIR}/lib/linux_pkg_install.inc.sh"
 
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
 SKIP_KEYGEN=0
@@ -48,25 +54,33 @@ parse_args() {
   done
 }
 
+require_linux() {
+  [[ "$(uname -s)" == "Linux" ]] ||
+    die "this script targets Linux (detected: $(uname -s)); install OpenSSH client and rsync manually elsewhere"
+}
+
 expand_projects_dir() {
   PROJECTS_DIR="${PROJECTS_DIR/#\~/$HOME}"
 }
 
-check_commands() {
+# Ensures ssh and rsync exist, calling the distro installer when either is missing.
+#
+# Inputs: none.
+# Outputs: none; exits non-zero if binaries are still missing after install.
+ensure_ssh_rsync_available() {
   local missing=()
-  for cmd in ssh rsync; do
-    command -v "$cmd" &>/dev/null || missing+=("$cmd")
-  done
-  [[ "${#missing[@]}" -eq 0 ]] || die "install missing commands: ${missing[*]} (rsync + OpenSSH client are required by Backr)"
-}
-
-ensure_projects_dir() {
-  if [[ ! -d "$PROJECTS_DIR" ]]; then
-    echo "Creating projects directory: ${PROJECTS_DIR}"
-    mkdir -p "$PROJECTS_DIR"
-  else
-    echo "Projects directory already exists: ${PROJECTS_DIR}"
+  command -v ssh &>/dev/null || missing+=(ssh)
+  command -v rsync &>/dev/null || missing+=(rsync)
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    echo "ssh and rsync are already installed."
+    return 0
   fi
+  echo "Installing missing tools: ${missing[*]} …"
+  backr_install_client_ssh_rsync
+  missing=()
+  command -v ssh &>/dev/null || missing+=(ssh)
+  command -v rsync &>/dev/null || missing+=(rsync)
+  [[ "${#missing[@]}" -eq 0 ]] || die "still missing after package install: ${missing[*]}"
 }
 
 maybe_create_ssh_key() {
@@ -81,6 +95,7 @@ maybe_create_ssh_key() {
   echo "No Ed25519 key found at ${priv}."
   read -r -p "Generate one now? [y/N] " ans || true
   if [[ "${ans:-}" =~ ^[yY]$ ]]; then
+    # External: `ssh-keygen` writes key material under ~/.ssh (OpenSSH).
     ssh-keygen -t ed25519 -f "$priv" -N "" -C "backr-$(whoami)@$(hostname -s 2>/dev/null || echo host)"
     echo "Created ${priv} and ${priv}.pub"
   else
@@ -109,10 +124,20 @@ Build/run this repo:
 EOF
 }
 
+ensure_projects_dir() {
+  if [[ ! -d "$PROJECTS_DIR" ]]; then
+    echo "Creating projects directory: ${PROJECTS_DIR}"
+    mkdir -p "$PROJECTS_DIR"
+  else
+    echo "Projects directory already exists: ${PROJECTS_DIR}"
+  fi
+}
+
 main() {
   parse_args "$@"
+  require_linux
   expand_projects_dir
-  check_commands
+  ensure_ssh_rsync_available
   ensure_projects_dir
   maybe_create_ssh_key
   print_next_steps
