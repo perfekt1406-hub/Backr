@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Purpose: Prepare a Linux backup host (NAS, home server, or spare laptop) to store Backr snapshots.
-# Role: Installs OpenSSH server + rsync when missing, enables sshd, drops in PubkeyAuthentication yes,
+# Role: Distro-aware install of OpenSSH server + rsync, enables sshd, drops in PubkeyAuthentication yes,
 #       then creates a dedicated UNIX user, backup root directory, and ~/.ssh layout for pubkey SSH.
 #
 # Run with sudo on the machine that will receive rsync over SSH. Non-Linux hosts are not supported here.
@@ -16,11 +16,6 @@
 #   -h, --help        Show this text.
 
 set -euo pipefail
-
-_BACKR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# External: `source` loads `backr_install_server_ssh_rsync` and `backr_sshd_ensure_pubkey_auth`.
-# shellcheck source=lib/linux_pkg_install.inc.sh
-source "${_BACKR_SCRIPT_DIR}/lib/linux_pkg_install.inc.sh"
 
 BACKR_USER="${BACKR_USER:-backr}"
 BACKR_ROOT="${BACKR_ROOT:-/srv/backr}"
@@ -63,6 +58,63 @@ parse_args() {
   done
 }
 
+#
+# Echoes package backend: apt, dnf, yum, pacman, zypper, apk, or unknown (reads /etc/os-release).
+#
+detect_pkg_backend() {
+  if [[ ! -f /etc/os-release ]]; then
+    echo unknown
+    return
+  fi
+  local id id_like
+  # shellcheck source=/dev/null
+  . /etc/os-release
+  id="${ID:-}"
+  id_like="${ID_LIKE:-}"
+
+  case "$id" in
+    debian | ubuntu | linuxmint | pop | zorin | elementary | raspbian | kali)
+      echo apt
+      ;;
+    fedora | rhel | centos | almalinux | rocky | ol)
+      echo dnf
+      ;;
+    amzn)
+      if command -v dnf &>/dev/null; then
+        echo dnf
+      elif command -v yum &>/dev/null; then
+        echo yum
+      else
+        echo unknown
+      fi
+      ;;
+    arch | manjaro | cachyos | endeavouros | garuda)
+      echo pacman
+      ;;
+    opensuse-tumbleweed | opensuse-leap | sled | sles | opensuse)
+      echo zypper
+      ;;
+    alpine)
+      echo apk
+      ;;
+    *)
+      if [[ "$id_like" == *debian* ]] || [[ "$id_like" == *ubuntu* ]]; then
+        echo apt
+      elif [[ "$id_like" == *fedora* ]] || [[ "$id_like" == *rhel* ]]; then
+        echo dnf
+      elif [[ "$id_like" == *arch* ]]; then
+        echo pacman
+      elif [[ "$id_like" == *suse* ]]; then
+        echo zypper
+      elif [[ "$id_like" == *alpine* ]]; then
+        echo apk
+      else
+        echo unknown
+      fi
+      ;;
+  esac
+}
+
 require_linux_root() {
   [[ "$(uname -s)" == "Linux" ]] || die "this host setup script targets Linux only"
   [[ "${EUID:-0}" -eq 0 ]] || die "run as root (sudo) so we can create the backup user and ${BACKR_ROOT}"
@@ -78,6 +130,107 @@ run_cmd() {
     echo "[dry-run] $*"
   else
     "$@"
+  fi
+}
+
+#
+# Inputs: $1 dry-run flag (1 = print only). Must run as root.
+#
+install_server_ssh_rsync() {
+  local dry="${1:-0}"
+  local backend
+  backend="$(detect_pkg_backend)"
+  echo "Detected package backend: ${backend}"
+
+  local run
+  if [[ "$dry" -eq 1 ]]; then
+    run() {
+      echo "[dry-run] $*"
+    }
+  else
+    run() {
+      "$@"
+    }
+  fi
+
+  case "$backend" in
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      run apt-get update -qq
+      run apt-get install -y openssh-server rsync
+      ;;
+    dnf)
+      run dnf install -y openssh-server rsync
+      ;;
+    yum)
+      run yum install -y openssh-server rsync
+      ;;
+    pacman)
+      run pacman -Sy --noconfirm openssh rsync
+      ;;
+    zypper)
+      run zypper --non-interactive refresh
+      run zypper --non-interactive install -y openssh rsync
+      ;;
+    apk)
+      run apk update
+      run apk add --no-cache openssh rsync
+      ;;
+    *)
+      die "unsupported distro for automatic install — install openssh-server + rsync manually"
+      ;;
+  esac
+
+  [[ "$dry" -eq 1 ]] && return 0
+
+  # External: systemctl manages SSH units on systemd desktops/servers.
+  if command -v systemctl &>/dev/null; then
+    if systemctl list-unit-files ssh.service &>/dev/null && systemctl cat ssh.service &>/dev/null; then
+      systemctl enable --now ssh
+    elif systemctl cat sshd.service &>/dev/null 2>&1; then
+      systemctl enable --now sshd
+    fi
+  fi
+
+  # External: OpenRC on Alpine-style hosts.
+  if command -v rc-update &>/dev/null; then
+    ssh-keygen -A 2>/dev/null || true
+    rc-update add sshd default 2>/dev/null || true
+    rc-service sshd start 2>/dev/null || true
+  elif ! systemctl is-active --quiet ssh 2>/dev/null && ! systemctl is-active --quiet sshd 2>/dev/null; then
+    echo "warning: enable and start sshd manually if this host should accept backups" >&2
+  fi
+}
+
+#
+# Inputs: $1 dry-run flag (1 = print only).
+#
+sshd_ensure_pubkey_auth() {
+  local dry="${1:-0}"
+  local drop_in="/etc/ssh/sshd_config.d/99-backr.conf"
+  local line='PubkeyAuthentication yes'
+
+  if [[ "$dry" -eq 1 ]]; then
+    echo "[dry-run] mkdir -p /etc/ssh/sshd_config.d"
+    echo "[dry-run] echo '${line}' > '${drop_in}'"
+    echo "[dry-run] systemctl reload ssh || systemctl reload sshd || rc-service sshd reload"
+    return 0
+  fi
+
+  mkdir -p /etc/ssh/sshd_config.d
+  if [[ ! -f "$drop_in" ]] || ! grep -qxF "$line" "$drop_in" 2>/dev/null; then
+    printf '%s\n' "$line" >"$drop_in"
+    chmod 644 "$drop_in"
+  fi
+
+  if systemctl cat ssh.service &>/dev/null 2>&1; then
+    systemctl reload ssh 2>/dev/null || true
+  fi
+  if systemctl cat sshd.service &>/dev/null 2>&1; then
+    systemctl reload sshd 2>/dev/null || true
+  fi
+  if command -v rc-service &>/dev/null; then
+    rc-service sshd reload 2>/dev/null || rc-service sshd restart 2>/dev/null || true
   fi
 }
 
@@ -117,12 +270,10 @@ print_sshd_hints() {
   cat <<EOF
 
 Next steps on this machine:
-  1. OpenSSH server, rsync, and PubkeyAuthentication=yes have been applied when this script was not run with --dry-run.
-  2. If you change /etc/ssh/sshd_config later, reload sshd:
-       systemctl reload ssh    # Debian/Ubuntu (unit may be ssh.service)
-       systemctl reload sshd   # Fedora/Arch
-  3. From each laptop, install your public key, e.g.:
-       ssh-copy-id -i ~/.ssh/id_ed25519.pub ${BACKR_USER}@$(hostname -f 2>/dev/null || hostname -s)
+  1. OpenSSH server, rsync, and PubkeyAuthentication=yes were applied unless you used --dry-run.
+  2. If you edit sshd config later: systemctl reload ssh   # Debian/Ubuntu
+     or: systemctl reload sshd                              # Fedora/Arch
+  3. From each laptop: ssh-copy-id -i ~/.ssh/id_ed25519.pub ${BACKR_USER}@$(hostname -f 2>/dev/null || hostname -s)
 
 Backr config.toml should use:
   [remote]
@@ -140,8 +291,8 @@ main() {
   parse_args "$@"
   require_linux_root
   normalize_root
-  backr_install_server_ssh_rsync "$DRY_RUN"
-  backr_sshd_ensure_pubkey_auth "$DRY_RUN"
+  install_server_ssh_rsync "$DRY_RUN"
+  sshd_ensure_pubkey_auth "$DRY_RUN"
   ensure_user_exists
   ensure_backup_tree
   ensure_ssh_dir

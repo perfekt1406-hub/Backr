@@ -30,21 +30,36 @@ Before you build or run Backr, install:
 | **System libraries for Tauri** | Follow the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS (on Linux this typically includes WebKitGTK and related packages). |
 | **`ssh` and `rsync`** | Used at runtime for backups and remote listing; required on the machine running Backr. |
 
+On **Linux**, `./scripts/setup-connecting-client.sh` can install the toolchain packages above plus **Rust** (via **rustup**) and **npm dependencies** in one run (see §4).
+
 The remote backup host must accept SSH public-key authentication and provide `rsync` on the server side.
 
 ---
 
 ## Getting started
 
-### 1. Clone and install dependencies
+### 1. Clone
 
 ```bash
 git clone https://github.com/perfekt1406-hub/Backr.git
-cd backr
+cd Backr
+```
+
+### 2. Install dependencies
+
+**Linux (recommended):** run the bootstrap script once — it installs Tauri build deps, Node.js, Rust (rustup), `ssh`/`rsync`, and **`npm ci`** / **`npm install`** in this repo:
+
+```bash
+./scripts/setup-connecting-client.sh
+```
+
+**Manual:** install the [requirements](#requirements) yourself, then:
+
+```bash
 npm install
 ```
 
-### 2. Run in development
+### 3. Run in development
 
 **Full desktop app** (starts Vite on port `1420` and opens the Tauri window):
 
@@ -68,7 +83,7 @@ npm run dev:mock
 
 Mock mode is enabled when the environment variable `VITE_BACKR_MOCK` is set to `1`.
 
-### 3. Production build
+### 4. Production build
 
 ```bash
 npm run tauri:build
@@ -76,21 +91,19 @@ npm run tauri:build
 
 Installable bundles are produced under `src-tauri/target/release/bundle/` according to your platform and `src-tauri/tauri.conf.json`.
 
-### 4. Optional: prepare machines with helper scripts
+### 5. Optional: Linux backup + dev bootstrap scripts
 
-On a **fresh Linux install**, these scripts detect **apt**, **dnf**, **yum** (Amazon Linux 2), **pacman**, **zypper**, or **apk** and install missing **OpenSSH** / **rsync** packages (the backup-host script also enables **sshd** and drops in **PubkeyAuthentication yes**). You still need **sudo** on the client when packages are missing.
+Both helpers detect **apt**, **dnf**, **yum**, **pacman**, **zypper**, **apk** and expect **sudo** where installs require elevation.
 
-On the **backup server** (Linux):
+**Backup server** — installs **OpenSSH server** + **rsync**, enables **sshd**, **`PubkeyAuthentication yes`**, creates user **`backr`** (default) and the backup tree:
 
 ```bash
 sudo ./scripts/setup-backup-host.sh --help
 ```
 
-On the **machine that runs Backr** (Linux desktop):
+**Dev laptop** — everything from **§2** (Tauri Linux deps, **Node.js** — NodeSource **22.x** on Debian/Ubuntu, **rustup** stable honoring **`src-tauri/Cargo.toml`** `rust-version`, **git**, **ssh/rsync**, **`npm ci`**) lives in **`setup-connecting-client.sh`**; run it **inside the cloned repo** after **§1**.
 
-```bash
-./scripts/setup-connecting-client.sh --help
-```
+Some enterprise **`yum`** images lack WebKitGTK **4.1** packages; use Fedora/Ubuntu/Arch or install [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) manually.
 
 ---
 
@@ -127,7 +140,7 @@ SSH host keys for backup connections are tracked in `~/.config/backr/known_hosts
 |------|------|
 | `src/` | Svelte 5 UI, routes, stores, and TypeScript command wrappers. |
 | `src-tauri/` | Rust crate: config, scheduler, tray, rsync/SSH backup, Tauri commands. |
-| `scripts/` | Host/client setup scripts plus `scripts/lib/` (distro-aware package helpers). |
+| `scripts/` | Distro-aware setup scripts for backup host and full dev bootstrap (`setup-connecting-client.sh`). |
 
 UI design notes can live in `brand-aesthetic.md` locally (that filename is gitignored). A deeper technical plan and remote snapshot layout are documented in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md).
 
