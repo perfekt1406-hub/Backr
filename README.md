@@ -30,7 +30,7 @@ Before you build or run Backr, install:
 | **System libraries for Tauri** | Follow the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS (on Linux this typically includes WebKitGTK and related packages). |
 | **`ssh` and `rsync`** | Used at runtime for backups and remote listing; required on the machine running Backr. |
 
-On **Linux**, `./scripts/setup-connecting-client.sh` can install the toolchain packages above plus **Rust** (via **rustup**) and **npm dependencies** in one run (see §4).
+On **Linux**, `./scripts/setup-connecting-client.sh` (default) installs the toolchain above, **`npm ci` / `npm install`**, runs **`npm run tauri:build`**, and installs the built **AppImage** plus a launcher entry under **`~/.local/share/`**. Use **`--deps-only`** for toolchain + npm only (no build; for **`npm run tauri:dev`**).
 
 The remote backup host must accept SSH public-key authentication and provide `rsync` on the server side.
 
@@ -47,7 +47,7 @@ cd Backr
 
 ### 2. Install dependencies
 
-**Linux (recommended):** run the bootstrap script once — it installs Tauri build deps, Node.js, Rust (rustup), `ssh`/`rsync`, and **`npm ci`** / **`npm install`** in this repo:
+**Linux (recommended):** run the bootstrap script once — it installs Tauri build deps, Node.js, Rust (rustup), `ssh`/`rsync`, **`npm ci`** / **`npm install`**, then **`npm run tauri:build`** and registers the **AppImage** in your app menu (`~/.local/share/backr/`). Add **`--deps-only`** if you only want the dev toolchain (skip the release build and menu install).
 
 ```bash
 ./scripts/setup-connecting-client.sh
@@ -101,7 +101,7 @@ Both helpers detect **apt**, **dnf**, **yum**, **pacman**, **zypper**, **apk** a
 sudo ./scripts/setup-backup-host.sh --help
 ```
 
-**Dev laptop** — everything from **§2** (Tauri Linux deps, **Node.js** — NodeSource **22.x** on Debian/Ubuntu, **rustup** stable honoring **`src-tauri/Cargo.toml`** `rust-version`, **git**, **ssh/rsync**, **`npm ci`**) lives in **`setup-connecting-client.sh`**; run it **inside the cloned repo** after **§1**.
+**Dev laptop** — **`setup-connecting-client.sh`** does the full bootstrap above by default (including **`npm run tauri:build`** + AppImage install). Pass **`--deps-only`** for the previous behavior (toolchain + **`npm ci`** only). Run it **inside the cloned repo** after **§1**.
 
 Some enterprise **`yum`** images lack WebKitGTK **4.1** packages; use Fedora/Ubuntu/Arch or install [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) manually.
 

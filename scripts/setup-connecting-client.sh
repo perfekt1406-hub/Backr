@@ -1,23 +1,31 @@
 #!/usr/bin/env bash
 #
-# Purpose: Prepare a Linux machine that builds and runs the Backr desktop app — toolchain + backups prep.
-# Role: Distro-aware install of Tauri Linux dependencies (WebKitGTK, SSL, build tools), Node.js LTS,
+# Purpose: Prepare a Linux machine for Backr — by default installs deps, builds the desktop AppImage from this repo,
+#          and registers it under ~/.local/share (launcher menu entry).
+# Role: Distro-aware OS packages for Tauri (WebKitGTK, SSL, build tools), Node.js LTS,
 #       Rust via rustup (respecting src-tauri/Cargo.toml rust-version), OpenSSH client + rsync, git/curl;
-#       runs npm ci/npm install in the repo; ensures projects dir + optional SSH key.
+#       npm ci/npm install; optional projects dir + SSH key; npm run tauri:build + AppImage install unless --deps-only.
 #
 # Run from anywhere with sudo available when elevated installs are needed:
 #   ./scripts/setup-connecting-client.sh [options]
 #
 # Options:
-#   --projects-dir PATH   Local folder containing one subdirectory per project (default: ~/Projects).
-#   --skip-keygen         Do not offer to create ~/.ssh/id_ed25519 if missing.
-#   -h, --help            Show this text.
+#   --projects-dir PATH            Local folder containing one subdirectory per project (default: ~/Projects).
+#   --skip-keygen                  Do not offer to create ~/.ssh/id_ed25519 if missing.
+#   --deps-only                    Install toolchain and npm deps only (no AppImage build / menu install); use for dev.
+#   --install-appimage             Same as default (explicit): build AppImage locally and install launcher entry.
+#   --install-appimage-build       Same as default (explicit).
+#   --appimage-url URL             Download this AppImage and add launcher entry only (no compile).
+#   -h, --help                     Show this text.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
 SKIP_KEYGEN=0
+# Exclusive setup goal: build (default) | deps | download — see set_setup_kind().
+SETUP_KIND=""
+APPIMAGE_URL_OVERRIDE=""
 
 APT_UPDATED=0
 
@@ -27,7 +35,21 @@ die() {
 }
 
 usage() {
-  sed -n '1,22p' "$0" | tail -n +2
+  sed -n '1,36p' "$0" | tail -n +2
+}
+
+#
+# Inputs: one of build | deps | download.
+# Outputs: sets SETUP_KIND or dies if another mode was already chosen.
+#
+set_setup_kind() {
+  local k="$1"
+  if [[ -z "$SETUP_KIND" ]]; then
+    SETUP_KIND="$k"
+    return 0
+  fi
+  [[ "$SETUP_KIND" == "$k" ]] ||
+    die "conflicting options — use only one of: (default / --install-appimage / --install-appimage-build), --deps-only, or --appimage-url"
 }
 
 parse_args() {
@@ -41,6 +63,24 @@ parse_args() {
       --skip-keygen)
         SKIP_KEYGEN=1
         shift
+        ;;
+      --deps-only)
+        set_setup_kind deps
+        shift
+        ;;
+      --install-appimage)
+        set_setup_kind build
+        shift
+        ;;
+      --install-appimage-build)
+        set_setup_kind build
+        shift
+        ;;
+      --appimage-url)
+        APPIMAGE_URL_OVERRIDE="${2:-}"
+        [[ -n "$APPIMAGE_URL_OVERRIDE" ]] || die "--appimage-url needs a value"
+        set_setup_kind download
+        shift 2
         ;;
       -h | --help)
         usage
@@ -389,6 +429,130 @@ expand_projects_dir() {
   PROJECTS_DIR="${PROJECTS_DIR/#\~/$HOME}"
 }
 
+#
+# Inputs: HTTPS URL to an AppImage.
+# Outputs: path to a downloaded temp file (caller must rm); returns non-zero if curl fails.
+# External: curl -fL writes bytes to a tempfile (follow redirects).
+#
+download_appimage_to_tempfile() {
+  local url="$1"
+  [[ -n "$url" ]] || die "internal: empty AppImage URL"
+  command -v curl &>/dev/null || die "curl required to download AppImage"
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/backr-setup-appimage.XXXXXX")"
+  # External: curl fetches URL into tmp with fail-on-HTTP-error and location following.
+  if ! curl -fL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  echo "$tmp"
+}
+
+#
+# Copies the repo icon into the user icon theme so Icon=com.backr.app resolves in launchers.
+#
+install_backr_icon_to_user_theme() {
+  local src="$REPO_ROOT/src-tauri/icons/128x128.png"
+  local dest_dir="$HOME/.local/share/icons/hicolor/128x128/apps"
+  local dest="$dest_dir/com.backr.app.png"
+  [[ -f "$src" ]] || return 0
+  mkdir -p "$dest_dir"
+  cp -f "$src" "$dest"
+  # External: gtk-update-icon-cache refreshes hicolor index when available (non-fatal if missing).
+  if command -v gtk-update-icon-cache &>/dev/null; then
+    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" &>/dev/null || true
+  fi
+}
+
+#
+# Inputs: absolute path to an AppImage file (already executable).
+# Outputs: installs ~/.local/share/backr/Backr.AppImage and ~/.local/share/applications/com.backr.app.desktop.
+#
+install_appimage_desktop_integration() {
+  local src="$1"
+  [[ -f "$src" ]] || die "AppImage not found: $src"
+  local dest_dir="$HOME/.local/share/backr"
+  local dest="${dest_dir}/Backr.AppImage"
+  mkdir -p "$dest_dir"
+  cp -f "$src" "$dest"
+  chmod u+x "$dest" || true
+
+  install_backr_icon_to_user_theme
+
+  local desktop="$HOME/.local/share/applications/com.backr.app.desktop"
+  mkdir -p "$(dirname "$desktop")"
+  cat >"$desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Backr
+Comment=Backr desktop backup client
+Exec=${dest} %u
+Icon=com.backr.app
+Terminal=false
+Categories=Utility;Archiving;
+StartupNotify=true
+EOF
+  # External: update-desktop-database indexes ~/.local applications for some desktop environments.
+  if command -v update-desktop-database &>/dev/null; then
+    update-desktop-database "$HOME/.local/share/applications" &>/dev/null || true
+  fi
+  echo "Installed AppImage: ${dest}"
+  echo "Launcher entry: ${desktop}"
+}
+
+#
+# Inputs: APPIMAGE_URL_OVERRIDE must be set (--appimage-url). Downloads that AppImage and installs launcher integration.
+# Dies on download failure (does not fall back to a local build).
+#
+install_appimage_from_network() {
+  local url="" tmp=""
+  [[ -n "$APPIMAGE_URL_OVERRIDE" ]] || die "internal: install_appimage_from_network needs --appimage-url"
+  url="$APPIMAGE_URL_OVERRIDE"
+  echo "Using AppImage URL from --appimage-url"
+  tmp="$(download_appimage_to_tempfile "$url")" || die "failed to download AppImage"
+  trap 'rm -f "$tmp"' RETURN
+  install_appimage_desktop_integration "$tmp"
+}
+
+#
+# Inputs: none (uses REPO_ROOT). Outputs: OS packages, Node, Rust, projects dir, optional SSH key, npm deps, tauri
+# release build, then integrates the produced AppImage into ~/.local like install_appimage_desktop_integration.
+#
+install_appimage_build_and_integrate() {
+  install_connecting_os_packages
+  ensure_nodejs
+  ensure_rust_toolchain
+  ensure_projects_dir
+  maybe_create_ssh_key
+  install_node_project_deps
+  echo "Building Backr AppImage (npm run tauri:build) …"
+  (cd "$REPO_ROOT" && npm run tauri:build)
+  install_appimage_desktop_integration "$(find_built_appimage_path)"
+}
+
+#
+# Finds the first built *.AppImage under src-tauri/target/release/bundle (after npm run tauri:build).
+#
+find_built_appimage_path() {
+  local hit=""
+  hit="$(find "$REPO_ROOT/src-tauri/target/release/bundle" -type f -name '*.AppImage' 2>/dev/null | head -n1 || true)"
+  [[ -n "$hit" ]] || die "build produced no .AppImage under src-tauri/target/release/bundle — check tauri bundle targets"
+  echo "$hit"
+}
+
+#
+# Prints post-install hints for AppImage users.
+#
+print_appimage_done() {
+  cat <<EOF
+
+── Backr AppImage installed ──
+  Menu / launcher: search for "Backr"
+  Binary:          ~/.local/share/backr/Backr.AppImage
+
+EOF
+}
+
 print_done() {
   cat <<EOF
 
@@ -416,16 +580,34 @@ EOF
 main() {
   parse_args "$@"
   require_linux
+
+  # Default when no mode flags: build AppImage locally and install menu entry.
+  SETUP_KIND="${SETUP_KIND:-build}"
+
   expand_projects_dir
 
-  install_connecting_os_packages
-  ensure_nodejs
-  ensure_rust_toolchain
-  ensure_projects_dir
-  maybe_create_ssh_key
-  install_node_project_deps
-
-  print_done
+  case "$SETUP_KIND" in
+    download)
+      install_appimage_from_network
+      print_appimage_done
+      ;;
+    deps)
+      install_connecting_os_packages
+      ensure_nodejs
+      ensure_rust_toolchain
+      ensure_projects_dir
+      maybe_create_ssh_key
+      install_node_project_deps
+      print_done
+      ;;
+    build)
+      install_appimage_build_and_integrate
+      print_appimage_done
+      ;;
+    *)
+      die "internal: unknown SETUP_KIND=${SETUP_KIND}"
+      ;;
+  esac
 }
 
 main "$@"
