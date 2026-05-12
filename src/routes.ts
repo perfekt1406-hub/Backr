@@ -1,6 +1,6 @@
 /*
  * Purpose: Declares hash-routed screens mounted inside `App.svelte`.
- * Role: Keeps default-export mapping beside navigation URLs (`#/setup`, `#/project/…`).
+ * Role: Maps `#/setup`, `#/host`, `#/`, `#/project/…` for laptop vs backup-host dashboards.
  */
 
 import DashboardView from "./components/dashboard/DashboardView.svelte";
