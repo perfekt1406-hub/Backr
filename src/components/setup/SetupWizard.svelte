@@ -3,9 +3,12 @@
   Role: Orchestrates `StepRemote`, `StepPaths`, and `StepVerify` with deterministic navigation guards.
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { get } from "svelte/store";
   import { replace } from "svelte-spa-router";
 
   import type { Config } from "../../types/config";
+  import { shellKind } from "../../stores/shell";
   import StepPaths from "./StepPaths.svelte";
   import StepRemote from "./StepRemote.svelte";
   import StepVerify from "./StepVerify.svelte";
@@ -29,6 +32,12 @@
   }
 
   let draft = $state<Config>(emptyConfig());
+
+  onMount(() => {
+    if (get(shellKind) === "host") {
+      replace("/host");
+    }
+  });
 
   /** Advances linearly while blocking empty mandatory remote fields. */
   function nextFromRemote(): void {

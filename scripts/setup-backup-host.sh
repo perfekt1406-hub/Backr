@@ -266,25 +266,29 @@ ensure_ssh_dir() {
   fi
 }
 
-print_sshd_hints() {
-  cat <<EOF
+#
+# Writes `/etc/backr/host.toml` so Backr can open host-dashboard mode on this machine without a client config.
+#
+# Inputs: uses globals BACKR_ROOT, BACKR_USER, DRY_RUN, run_cmd pattern via explicit branches.
+#
+write_host_marker() {
+  local meta_dir="/etc/backr"
+  local f="${meta_dir}/host.toml"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] mkdir -p ${meta_dir} && write ${f}"
+    return 0
+  fi
+  mkdir -p "$meta_dir"
+  chmod 755 "$meta_dir"
+  printf '%s\n' "backup_root = \"${BACKR_ROOT}\"" "ssh_user = \"${BACKR_USER}\"" >"$f"
+  chmod 644 "$f"
+}
 
-Next steps on this machine:
-  1. OpenSSH server, rsync, and PubkeyAuthentication=yes were applied unless you used --dry-run.
-  2. If you edit sshd config later: systemctl reload ssh   # Debian/Ubuntu
-     or: systemctl reload sshd                              # Fedora/Arch
-  3. From each laptop: ssh-copy-id -i ~/.ssh/id_ed25519.pub ${BACKR_USER}@$(hostname -f 2>/dev/null || hostname -s)
-
-Backr config.toml should use:
-  [remote]
-  host        = "<this host LAN IP or DNS>"
-  user        = "${BACKR_USER}"
-  ssh_key     = "<path to your PRIVATE key on the laptop>"
-  port        = 22
-  backup_path = "${BACKR_ROOT}"
-
-Snapshot trees will appear as: ${BACKR_ROOT}/<project>/<YYYY-MM-DD_HH-MM-SS>/
-EOF
+#
+# Prints a single completion line (no follow-up checklist — setup is fully automated).
+#
+print_host_ready() {
+  echo "Backr backup host ready (backup_root=${BACKR_ROOT}, ssh_user=${BACKR_USER})."
 }
 
 main() {
@@ -296,7 +300,8 @@ main() {
   ensure_user_exists
   ensure_backup_tree
   ensure_ssh_dir
-  print_sshd_hints
+  write_host_marker
+  print_host_ready
 }
 
 main "$@"

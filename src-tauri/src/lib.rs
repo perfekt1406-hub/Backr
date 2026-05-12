@@ -7,6 +7,7 @@ pub mod backup;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod host_config;
 pub mod progress_sink;
 pub mod scheduler;
 pub mod state;
@@ -76,6 +77,9 @@ pub fn run() {
             commands::config_cmd::get_config,
             commands::config_cmd::save_config,
             commands::config_cmd::test_connection,
+            commands::host_cmd::resolve_shell_bootstrap,
+            commands::host_cmd::host_list_snapshot_projects,
+            commands::host_cmd::host_volume_summary,
             commands::project_cmd::list_projects,
             commands::project_cmd::get_backup_status,
             commands::backup_cmd::run_backup,

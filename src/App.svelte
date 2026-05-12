@@ -1,44 +1,103 @@
 <!--
   Purpose: Root chrome registering IPC listeners and guarding routes against unset configuration.
-  Role: Hosts sidebar navigation plus hash-router outlets wrapped by shared instrumentation chrome.
+  Role: Resolves laptop vs backup-host dashboard vs setup via `resolve_shell_bootstrap`, then mounts hash routes.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { get } from "svelte/store";
   import Router, { replace } from "svelte-spa-router";
 
   import ErrorToast from "./components/shared/ErrorToast.svelte";
   import SidebarNav from "./components/layout/SidebarNav.svelte";
   import { listenBackupProgress } from "./lib/events";
-  import { getConfig } from "./lib/commands";
+  import { getConfig, resolveShellBootstrap } from "./lib/commands";
   import { registerMockProgressAppender } from "./lib/mockProgressSink";
   import routes from "./routes";
   import { appendProgressLine } from "./stores/backup";
+  import { hostDashboardRoot, hostSshUser, shellKind } from "./stores/shell";
 
   let checking = $state(true);
+
+  /**
+   * Applies hash redirects once bootstrap mode and optional laptop config are known.
+   */
+  function routeForBootstrap(
+    mode: "setup" | "client" | "host",
+    cfgKnown: boolean,
+  ): void {
+    const hash = window.location.hash || "#/";
+    if (mode === "host") {
+      if (!hash.includes("/host")) {
+        replace("/host");
+      }
+      return;
+    }
+    if (mode === "setup") {
+      if (!hash.includes("/setup")) {
+        replace("/setup");
+      }
+      return;
+    }
+    if (hash.includes("/host")) {
+      replace("/");
+    }
+    if (!cfgKnown && !hash.includes("/setup")) {
+      replace("/setup");
+    }
+    if (cfgKnown && hash.includes("/setup")) {
+      replace("/");
+    }
+  }
 
   onMount(() => {
     registerMockProgressAppender(appendProgressLine);
 
-    let unlisten: (() => void) | undefined;
+    let unlistenBackup: (() => void) | undefined;
+    let removeHashListener: (() => void) | undefined;
 
     void (async () => {
       try {
-        const cfg = await getConfig();
-        const hash = window.location.hash || "#/";
-        if (!cfg && !hash.includes("/setup")) {
-          replace("/setup");
+        const bootstrap = await resolveShellBootstrap();
+        if (bootstrap.mode === "host") {
+          shellKind.set("host");
+          hostDashboardRoot.set(bootstrap.backup_root);
+          hostSshUser.set(bootstrap.ssh_user ?? null);
+          routeForBootstrap("host", false);
+        } else if (bootstrap.mode === "setup") {
+          shellKind.set("setup");
+          hostDashboardRoot.set(null);
+          hostSshUser.set(null);
+          routeForBootstrap("setup", false);
+        } else {
+          shellKind.set("client");
+          hostDashboardRoot.set(null);
+          hostSshUser.set(null);
+          const cfg = await getConfig();
+          routeForBootstrap("client", cfg != null);
         }
-        if (cfg && hash.includes("/setup")) {
-          replace("/");
-        }
-        unlisten = await listenBackupProgress((line) => appendProgressLine(line));
+
+        unlistenBackup = await listenBackupProgress((line) => appendProgressLine(line));
+
+        const onHash = (): void => {
+          const mode = get(shellKind);
+          if (mode === "host") {
+            routeForBootstrap("host", false);
+          } else if (mode === "setup") {
+            routeForBootstrap("setup", false);
+          } else {
+            void getConfig().then((c) => routeForBootstrap("client", c != null));
+          }
+        };
+        window.addEventListener("hashchange", onHash);
+        removeHashListener = () => window.removeEventListener("hashchange", onHash);
       } finally {
         checking = false;
       }
     })();
 
     return () => {
-      unlisten?.();
+      unlistenBackup?.();
+      removeHashListener?.();
     };
   });
 </script>

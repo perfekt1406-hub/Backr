@@ -3,9 +3,10 @@
   Role: Persistent shell chrome—IBM Plex Mono stack and token-driven borders per `brand-aesthetic.md`.
 -->
 <script lang="ts">
-  import { FolderGit2, Radar, Settings2 } from "lucide-svelte";
+  import { HardDrive, FolderGit2, Radar, Settings2 } from "lucide-svelte";
   import { link } from "svelte-spa-router";
 
+  import { shellKind } from "../../stores/shell";
   import { useDevMock } from "../../lib/useDevMock";
 
   const devMockActive = useDevMock();
@@ -32,38 +33,71 @@
     </div>
     <div class="min-w-0">
       <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--muted)]">
-        Snapshot backup
+        {#if $shellKind === "host"}
+          Backup host
+        {:else}
+          Snapshot backup
+        {/if}
       </div>
       <div class="truncate text-lg font-semibold text-[var(--text)]">Backr</div>
       <p class="mt-2 text-[11px] leading-snug text-[var(--muted2)]">
-        SSH · rsync · hardlink snapshots
+        {#if $shellKind === "host"}
+          Local snapshot tree · read-only view
+        {:else}
+          SSH · rsync · hardlink snapshots
+        {/if}
       </p>
     </div>
   </div>
 
   <nav class="flex flex-col gap-1 text-[13px]" aria-label="Primary">
-    <a
-      href="/"
-      class="flex items-center gap-2 rounded-[5px] px-3 py-2 text-[var(--text)] transition-colors hover:bg-[var(--bg3)] hover:text-[var(--accent-hover)]"
-      use:link
-    >
-      <FolderGit2 size={18} class="text-[var(--accent)]" aria-hidden="true" />
-      Projects
-    </a>
-    <a
-      href="/setup"
-      class="flex items-center gap-2 rounded-[5px] px-3 py-2 text-[var(--muted2)] transition-colors hover:bg-[var(--bg3)] hover:text-[var(--accent-hover)]"
-      use:link
-    >
-      <Settings2 size={18} class="text-[var(--muted)]" aria-hidden="true" />
-      Settings
-    </a>
+    {#if $shellKind === "host"}
+      <a
+        href="/host"
+        class="flex items-center gap-2 rounded-[5px] px-3 py-2 text-[var(--text)] transition-colors hover:bg-[var(--bg3)] hover:text-[var(--accent-hover)]"
+        use:link
+      >
+        <HardDrive size={18} class="text-[var(--accent)]" aria-hidden="true" />
+        Storage
+      </a>
+    {:else if $shellKind === "setup"}
+      <a
+        href="/setup"
+        class="flex items-center gap-2 rounded-[5px] px-3 py-2 text-[var(--text)] transition-colors hover:bg-[var(--bg3)] hover:text-[var(--accent-hover)]"
+        use:link
+      >
+        <Settings2 size={18} class="text-[var(--accent)]" aria-hidden="true" />
+        Setup
+      </a>
+    {:else}
+      <a
+        href="/"
+        class="flex items-center gap-2 rounded-[5px] px-3 py-2 text-[var(--text)] transition-colors hover:bg-[var(--bg3)] hover:text-[var(--accent-hover)]"
+        use:link
+      >
+        <FolderGit2 size={18} class="text-[var(--accent)]" aria-hidden="true" />
+        Projects
+      </a>
+      <a
+        href="/setup"
+        class="flex items-center gap-2 rounded-[5px] px-3 py-2 text-[var(--muted2)] transition-colors hover:bg-[var(--bg3)] hover:text-[var(--accent-hover)]"
+        use:link
+      >
+        <Settings2 size={18} class="text-[var(--muted)]" aria-hidden="true" />
+        Settings
+      </a>
+    {/if}
   </nav>
 
   <div class="mt-auto border-t border-[var(--border)] pt-4">
     <p class="label-caps leading-relaxed text-[var(--muted)]">
-      Local projects<br />
-      <span class="text-[var(--muted2)]">→ remote snapshot tree</span>
+      {#if $shellKind === "host"}
+        On-disk snapshots<br />
+        <span class="text-[var(--muted2)]">pushed from clients</span>
+      {:else}
+        Local projects<br />
+        <span class="text-[var(--muted2)]">→ remote snapshot tree</span>
+      {/if}
     </p>
   </div>
 </aside>

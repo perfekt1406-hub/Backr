@@ -13,6 +13,7 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:dev:mock": "VITE_BACKR_MOCK=1 tauri dev",
+    "tauri:host": "BACKR_HOST_MODE=1 tauri dev",
     "tauri:build": "tauri build"
   },
   "dependencies": {

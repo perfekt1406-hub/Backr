@@ -9,8 +9,46 @@ import type { ActivityPoint } from "../types/activity";
 import type { BackupStatus, ProjectInfo } from "../types/project";
 import type { Config } from "../types/config";
 import type { FileEntry, SnapshotEntry, SnapshotFileContents, RestoreEveryProjectRow } from "../types/snapshot";
+import type { HostProjectRow, HostVolumeSummary } from "../types/hostDashboard";
+import type { ShellBootstrap } from "../types/shellBootstrap";
 import * as devMockBackend from "./devMock/backend";
 import { useDevMock } from "./useDevMock";
+
+/**
+ * Resolves whether the UI should open setup, laptop client, or backup-host dashboard.
+ *
+ * External: `invoke` → `resolve_shell_bootstrap`.
+ */
+export async function resolveShellBootstrap(): Promise<ShellBootstrap> {
+  if (useDevMock()) {
+    return devMockBackend.mockResolveShellBootstrap();
+  }
+  return invoke<ShellBootstrap>("resolve_shell_bootstrap");
+}
+
+/**
+ * Lists local snapshot directories under `backup_root` on this machine (host dashboard).
+ *
+ * External: `invoke` → `host_list_snapshot_projects`.
+ */
+export async function hostListSnapshotProjects(backupRoot: string): Promise<HostProjectRow[]> {
+  if (useDevMock()) {
+    return devMockBackend.mockHostListSnapshotProjects();
+  }
+  return invoke<HostProjectRow[]>("host_list_snapshot_projects", { backupRoot });
+}
+
+/**
+ * Reports coarse disk usage for the filesystem backing `backup_root` via `df`.
+ *
+ * External: `invoke` → `host_volume_summary`.
+ */
+export async function hostVolumeSummary(backupRoot: string): Promise<HostVolumeSummary> {
+  if (useDevMock()) {
+    return devMockBackend.mockHostVolumeSummary(backupRoot);
+  }
+  return invoke<HostVolumeSummary>("host_volume_summary", { backupRoot });
+}
 
 /**
  * Loads persisted configuration from managed state (null before first save).

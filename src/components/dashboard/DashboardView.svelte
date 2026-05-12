@@ -4,6 +4,8 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { get } from "svelte/store";
+  import { replace } from "svelte-spa-router";
 
   import { Layers } from "lucide-svelte";
 
@@ -18,10 +20,15 @@
     refreshBackupStatus,
   } from "../../stores/backup";
   import { refreshProjects, projects } from "../../stores/projects";
+  import { shellKind } from "../../stores/shell";
   import * as commands from "../../lib/commands";
   import { relativeFromIso } from "../../lib/time";
 
   onMount(() => {
+    if (get(shellKind) === "host") {
+      replace("/host");
+      return;
+    }
     void refreshProjects();
     void refreshBackupStatus();
     const id = window.setInterval(() => void refreshBackupStatus(), 5000);

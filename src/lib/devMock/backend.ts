@@ -4,8 +4,10 @@
  */
 
 import type { ActivityPoint } from "../../types/activity";
+import type { HostProjectRow, HostVolumeSummary } from "../../types/hostDashboard";
 import type { Config } from "../../types/config";
 import type { BackupStatus, ProjectInfo } from "../../types/project";
+import type { ShellBootstrap } from "../../types/shellBootstrap";
 import type {
   FileEntry,
   SnapshotEntry,
@@ -224,4 +226,28 @@ export async function mockRestoreAllProjects(): Promise<RestoreEveryProjectRow[]
 export async function mockGetActivitySeries(): Promise<ActivityPoint[]> {
   await delay(40);
   return structuredClone(activityHistory);
+}
+
+/**
+ * Mock bootstrap — browser dev mock always behaves as a configured laptop client.
+ *
+ * External: mirrors `resolve_shell_bootstrap` IPC shape for local-only previews.
+ */
+export async function mockResolveShellBootstrap(): Promise<ShellBootstrap> {
+  await delay(15);
+  return { mode: "client" };
+}
+
+/**
+ * Mock empty host tree — host dashboard is exercised via real Tauri / backup servers.
+ */
+export async function mockHostListSnapshotProjects(): Promise<HostProjectRow[]> {
+  await delay(30);
+  return [];
+}
+
+/** Mock volume summary with unknown sizes (no `df` in browser). */
+export async function mockHostVolumeSummary(backupRoot: string): Promise<HostVolumeSummary> {
+  await delay(15);
+  return { backup_root: backupRoot, bytes_avail: null, bytes_size: null };
 }
