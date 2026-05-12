@@ -127,7 +127,7 @@ SSH host keys for backup connections are tracked in `~/.config/backr/known_hosts
 | `src-tauri/` | Rust crate: config, scheduler, tray, rsync/SSH backup, Tauri commands. |
 | `scripts/` | Optional bash helpers for host and client setup. |
 
-Design and product notes for the UI live in [brand-aesthetic.md](brand-aesthetic.md). A deeper technical plan and remote snapshot layout are documented in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md).
+UI design notes can live in `brand-aesthetic.md` locally (that filename is gitignored). A deeper technical plan and remote snapshot layout are documented in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md).
 
 ---
 
