@@ -30,13 +30,25 @@ Before you build or run Backr, install:
 | **System libraries for Tauri** | Follow the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS (on Linux this typically includes WebKitGTK and related packages). |
 | **`ssh` and `rsync`** | Used at runtime for backups and remote listing; required on the machine running Backr. |
 
-On **Linux**, `./scripts/setup-connecting-client.sh` (default) installs the toolchain above, **`npm ci` / `npm install`**, runs **`npm run tauri:build`**, and installs the built **AppImage** plus a launcher entry under **`~/.local/share/`**. Use **`--deps-only`** for toolchain + npm only (no build; for **`npm run tauri:dev`**).
+On **Linux**, `./scripts/setup-connecting-client.sh` (default) installs the toolchain above, **`npm ci` / `npm install`**, runs **`npm run tauri:build`**, and installs the built **AppImage** plus a launcher entry under **`~/.local/share/`**. Pass **`--backup-host`** *hostname-or-IP* (or **`BACKR_BACKUP_HOST`**) so the script checks pubkey **`ssh`** (BatchMode; **no** passwords / **no** `ssh-copy-id`) and prints a **`BACKR_AUTHORIZED_KEYS`** one-liner if trust is still missing. Use **`--deps-only`** for toolchain + npm only (no build; for **`npm run tauri:dev`**).
 
-The remote backup host must accept SSH public-key authentication and provide `rsync` on the server side.
+The remote backup host must provide **`rsync`** and SSH access; **`setup-backup-host.sh`** merges **`BACKR_AUTHORIZED_KEYS`** / **`--pubkey`**, turns **`PubkeyAuthentication`** on, and applies **`Match User`** rules so the **`backr`** account is **pubkey-only** once **`authorized_keys`** has at least one key line (no SSH password for that account after that).
 
 ---
 
 ## Getting started
+
+### Fast path (automated scripts only)
+
+1. **On the backup machine (once, as root):**  
+   `curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash`  
+   To inject your laptop’s pubkey in the same step (no `ssh-copy-id` later), set **`BACKR_AUTHORIZED_KEYS`** as in [§5](#5-optional-linux-backup-host-script-nas--server).
+2. **On your laptop:** clone the repo, then  
+   `./scripts/setup-connecting-client.sh --backup-host BACKUP_IP_OR_DNS`  
+   If pubkey login is not ready yet, the script prints your pubkey and the **`BACKR_AUTHORIZED_KEYS`** command — still **no** `ssh-copy-id` or SSH passwords in our scripts.
+3. **Launch Backr** from the app menu and finish the in-app setup wizard.
+
+Both scripts start an optional **multiple-choice questionnaire** when **`/dev/tty`** is available (arrow-key **`dialog`** / **`whiptail`** menus when possible — they **`apt`/`dnf`/… install `dialog`** if needed; the laptop script uses **`sudo`** for that step). Answers **`4`** = *I don't know*. At the end you get **tailored «what to do next»** text derived from those answers plus auto-detection. Piped installs (no TTY) or **`BACKR_NON_INTERACTIVE=1`** / **`--non-interactive`** skip prompts and print shorter defaults instead.
 
 ### 1. Clone
 
@@ -45,12 +57,18 @@ git clone https://github.com/perfekt1406-hub/Backr.git
 cd Backr
 ```
 
-### 2. Install dependencies
+### 2. Install Backr on your laptop (inside the repo)
 
-**Linux (recommended):** run the bootstrap script once — it installs Tauri build deps, Node.js, Rust (rustup), `ssh`/`rsync`, **`npm ci`** / **`npm install`**, then **`npm run tauri:build`** and registers the **AppImage** in your app menu (`~/.local/share/backr/`). Add **`--deps-only`** if you only want the dev toolchain (skip the release build and menu install).
+**Linux (recommended):** one command installs Tauri deps, Node.js, Rust, **`npm ci` / `npm install`**, **`npm run tauri:build`**, and registers the **AppImage** in your app menu. Pass your backup server address so the script verifies pubkey **`ssh`** (defaults SSH user **`backr`** when you pass only a hostname or IP) and prints bootstrap commands if needed (**still no** `ssh-copy-id`):
 
 ```bash
-./scripts/setup-connecting-client.sh
+./scripts/setup-connecting-client.sh --backup-host 192.168.1.50
+```
+
+Use **`--deps-only`** if you only want the dev toolchain (no release build or menu install).
+
+```bash
+./scripts/setup-connecting-client.sh --deps-only --backup-host nas.local
 ```
 
 **Manual:** install the [requirements](#requirements) yourself, then:
@@ -91,19 +109,29 @@ npm run tauri:build
 
 Installable bundles are produced under `src-tauri/target/release/bundle/` according to your platform and `src-tauri/tauri.conf.json`.
 
-### 5. Optional: Linux backup + dev bootstrap scripts
+### 5. Optional: Linux backup host script (NAS / server)
 
-Both helpers detect **apt**, **dnf**, **yum**, **pacman**, **zypper**, **apk** and expect **sudo** where installs require elevation.
+The backup helper detects **apt**, **dnf**, **yum**, **pacman**, **zypper**, **apk** and expects **sudo**. It installs **OpenSSH server** + **rsync**, validates **`sshd`**, ensures **`/etc/ssh/sshd_config.d/`** drop-ins apply, writes **`PubkeyAuthentication yes`**, creates **`backr`** + **`/srv/backr`**, merges optional pubkeys (**`BACKR_AUTHORIZED_KEYS`**, **`--pubkey`**, **`--pubkey-file`**). After **`authorized_keys`** contains at least one pubkey line for **`backr`**, it adds **`Match User`** rules so that account is **pubkey-only** (no SSH password / keyboard-interactive for **`backr`**). It fixes **SELinux** contexts when enforcing, opens **SSH** on **UFW** / **firewalld** only when those stacks are already active (never enables a firewall by surprise — use **`--no-firewall`** to skip), writes **`/etc/backr/host.toml`**, prints an **auto-detected** summary (**`/etc/os-release`**, firewall managers, **`sshd -T`** ports/auth toggles, **`ss`** listeners), and starts an optional **questionnaire** when **`/dev/tty`** exists (choice **4** = *I don't know*) followed by **tailored next-step instructions** (**--non-interactive** or unattended stdin pipes skip prompts).
 
-**Backup server** — installs **OpenSSH server** + **rsync**, enables **sshd**, **`PubkeyAuthentication yes`**, creates user **`backr`** (default) and the backup tree:
+**Typical one-liner on the backup machine** (no repo clone):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash
+```
+
+**Trust your laptop key without running `ssh-copy-id` later** (run on the backup host; paste your pubkey line):
+
+```bash
+sudo BACKR_AUTHORIZED_KEYS="ssh-ed25519 AAAA… comment" bash -c 'curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | bash'
+```
+
+Repo checkout equivalent:
 
 ```bash
 sudo ./scripts/setup-backup-host.sh --help
 ```
 
-**Dev laptop** — **`setup-connecting-client.sh`** does the full bootstrap above by default (including **`npm run tauri:build`** + AppImage install). Pass **`--deps-only`** for the previous behavior (toolchain + **`npm ci`** only). Run it **inside the cloned repo** after **§1**.
-
-Some enterprise **`yum`** images lack WebKitGTK **4.1** packages; use Fedora/Ubuntu/Arch or install [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) manually.
+**Still environment-specific (not scripted):** router port-forwards, VPS/cloud security groups, proprietary NAS OS images without normal **`apt`/`dnf`**, SSH clients targeting the wrong **Port** vs **`sshd`**, and some **`yum`**-only images that omit WebKitGTK **4.1** for laptop builds (use Fedora/Ubuntu/Arch or [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) manually).
 
 ---
 
@@ -142,7 +170,7 @@ Per-project snapshot counts and “last backup” labels on the **dashboard** ar
 |------|------|
 | `src/` | Svelte 5 UI, routes, stores, and TypeScript command wrappers. |
 | `src-tauri/` | Rust crate: config, scheduler, tray, rsync/SSH backup, Tauri commands. |
-| `scripts/` | Distro-aware setup scripts for backup host and full dev bootstrap (`setup-connecting-client.sh`). |
+| `scripts/` | `setup-backup-host.sh` & `setup-connecting-client.sh`: bootstrap + optional **questionnaires** (choice **4** = *I don't know*) → **tailored next steps**; **`--non-interactive`** skips prompts (pipes/CI); **no** `ssh-copy-id`. |
 
 UI design notes can live in `brand-aesthetic.md` locally (that filename is gitignored). A deeper technical plan and remote snapshot layout are documented in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md).
 
