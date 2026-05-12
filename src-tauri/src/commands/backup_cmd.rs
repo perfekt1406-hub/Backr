@@ -113,6 +113,14 @@ pub async fn execute_backup_cycle_with_sink(
             &dest_folder,
         )
         .await?;
+
+        let snapshot_count_after = snapshots.len() + 1;
+        crate::project_snapshot_cache::record_backup_success(
+            &cfg,
+            &project_name,
+            &new_name,
+            snapshot_count_after,
+        )?;
     }
 
     let now = Utc::now();

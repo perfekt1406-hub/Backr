@@ -106,12 +106,14 @@ export async function testConnection(
  * Lists immediate child directories of `local.projects_path`.
  *
  * External: `invoke` → `list_projects`.
+ *
+ * @param probeRemote When true, probes SSH and refreshes local snapshot stats cache; when false (default), uses only local disk cache so the dashboard works without LAN reachability.
  */
-export async function listProjects(): Promise<ProjectInfo[]> {
+export async function listProjects(probeRemote = false): Promise<ProjectInfo[]> {
   if (useDevMock()) {
     return devMockBackend.mockListProjects();
   }
-  return invoke<ProjectInfo[]>("list_projects");
+  return invoke<ProjectInfo[]>("list_projects", { probe_remote: probeRemote });
 }
 
 /**

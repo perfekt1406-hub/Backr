@@ -1,17 +1,15 @@
 /*
- * Purpose: Holds bootstrap routing kind after `resolve_shell_bootstrap` completes.
- * Role: Sidebar chrome and `$effect` redirects switch on laptop vs backup-host dashboard vs setup.
+ * Purpose: Tracks laptop vs setup wizard vs backup-host dashboard bootstrap outcome.
+ * Role: Populated from `resolve_shell_bootstrap` in `App.svelte`; sidebar reads `shellKind`.
  */
 
-import { writable } from "svelte/store";
+import { writable, type Writable } from "svelte/store";
 
-/** High-level shell: setup wizard, normal backup client, or read-only host viewer. */
-export type ShellKind = "setup" | "client" | "host";
+/** SPA bootstrap classification mirrored from Rust [`resolve_shell_bootstrap`]. */
+export const shellKind: Writable<"client" | "setup" | "host"> = writable("client");
 
-export const shellKind = writable<ShellKind>("client");
+/** Absolute backup root passed through [`ShellBootstrap`] for NAS-local dashboards. */
+export const hostDashboardRoot: Writable<string | null> = writable(null);
 
-/** Canonical backup root path when `shellKind` is `host` (from bootstrap / marker file). */
-export const hostDashboardRoot = writable<string | null>(null);
-
-/** Optional SSH account name from `/etc/backr/host.toml` (informational in UI). */
-export const hostSshUser = writable<string | null>(null);
+/** Optional SSH user label surfaced next to host chrome — informational only. */
+export const hostSshUser: Writable<string | null> = writable(null);

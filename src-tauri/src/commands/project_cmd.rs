@@ -5,11 +5,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::State;
 
 use crate::error::BackrError;
+use crate::project_snapshot_cache::{self, load_snapshot_cache, remote_cache_key, save_snapshot_cache};
 use crate::state::AppState;
 
 /// One row in the dashboard project table.
@@ -21,6 +22,9 @@ pub struct ProjectInfo {
     pub last_backup_at: Option<DateTime<Utc>>,
     /// Count of remote snapshot directories matching the strict naming convention.
     pub snapshot_count: usize,
+    /// True when `last_backup_at` / `snapshot_count` came from disk cache (SSH unreachable).
+    #[serde(default)]
+    pub stats_from_cache: bool,
 }
 
 /// Parsed backup cadence information shown in the status chrome.
@@ -38,11 +42,21 @@ pub struct BackupStatus {
 
 /// Lists immediate child directories of `local.projects_path` as project names.
 ///
+/// # Inputs
+///
+/// * `probe_remote` — when `Some(true)`, probes SSH for live snapshot listings and refreshes disk cache;
+///   when `None` or `Some(false)`, uses **only** local project folders plus [`crate::project_snapshot_cache`]
+///   so the dashboard works off-grid without hanging on SSH (after backups or an explicit remote refresh).
+///
 /// # Returns
 ///
-/// A vector sorted lexicographically; remote snapshot metadata is hydrated via SSH when configured.
+/// A vector sorted lexicographically.
 #[tauri::command]
-pub async fn list_projects(state: State<'_, Arc<AppState>>) -> Result<Vec<ProjectInfo>, String> {
+pub async fn list_projects(
+    state: State<'_, Arc<AppState>>,
+    probe_remote: Option<bool>,
+) -> Result<Vec<ProjectInfo>, String> {
+    let probe_remote = probe_remote.unwrap_or(false);
     let cfg = {
         let g = state.config.lock().await;
         g.clone()
@@ -63,10 +77,49 @@ pub async fn list_projects(state: State<'_, Arc<AppState>>) -> Result<Vec<Projec
         .collect();
     names.sort();
 
-    let known_hosts = crate::config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+    let key = remote_cache_key(&cfg);
+    let disk_cache = load_snapshot_cache();
+    let mut persisted = if disk_cache.remote_key == key {
+        disk_cache.clone()
+    } else {
+        project_snapshot_cache::SnapshotCacheFile {
+            remote_key: key.clone(),
+            updated_at: None,
+            projects: std::collections::HashMap::new(),
+        }
+    };
+    persisted.remote_key = key.clone();
+
     let mut out = Vec::new();
+
+    if !probe_remote {
+        for name in names {
+            match persisted.projects.get(&name) {
+                Some(c) => {
+                    out.push(ProjectInfo {
+                        name,
+                        last_backup_at: c.last_backup_at,
+                        snapshot_count: c.snapshot_count,
+                        stats_from_cache: true,
+                    });
+                }
+                None => {
+                    out.push(ProjectInfo {
+                        name,
+                        last_backup_at: None,
+                        snapshot_count: 0,
+                        stats_from_cache: false,
+                    });
+                }
+            }
+        }
+        return Ok(out);
+    }
+
+    let known_hosts = crate::config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+
     for name in names {
-        let snaps = crate::backup::ssh::remote_list_snapshot_names(
+        match crate::backup::ssh::remote_list_snapshot_names(
             &cfg.remote.ssh_key,
             &known_hosts,
             &cfg.remote.host,
@@ -76,15 +129,49 @@ pub async fn list_projects(state: State<'_, Arc<AppState>>) -> Result<Vec<Projec
             &name,
         )
         .await
-        .unwrap_or_default();
-
-        let last = snaps.first().and_then(|s| parse_snapshot_timestamp(s));
-        out.push(ProjectInfo {
-            name,
-            last_backup_at: last,
-            snapshot_count: snaps.len(),
-        });
+        {
+            Ok(snaps) => {
+                let last = snaps.first().and_then(|s| parse_snapshot_timestamp(s));
+                persisted.projects.insert(
+                    name.clone(),
+                    project_snapshot_cache::CachedProjectStats {
+                        last_backup_at: last,
+                        snapshot_count: snaps.len(),
+                    },
+                );
+                out.push(ProjectInfo {
+                    name,
+                    last_backup_at: last,
+                    snapshot_count: snaps.len(),
+                    stats_from_cache: false,
+                });
+            }
+            Err(_) => match persisted.projects.get(&name) {
+                Some(c) => {
+                    out.push(ProjectInfo {
+                        name,
+                        last_backup_at: c.last_backup_at,
+                        snapshot_count: c.snapshot_count,
+                        stats_from_cache: true,
+                    });
+                }
+                None => {
+                    out.push(ProjectInfo {
+                        name,
+                        last_backup_at: None,
+                        snapshot_count: 0,
+                        stats_from_cache: false,
+                    });
+                }
+            },
+        }
     }
+
+    persisted.updated_at = Some(Utc::now());
+    if let Err(err) = save_snapshot_cache(&persisted) {
+        tracing::warn!("failed to persist project snapshot cache: {err}");
+    }
+
     Ok(out)
 }
 
@@ -124,6 +211,5 @@ pub async fn get_backup_status(state: State<'_, Arc<AppState>>) -> Result<Backup
 ///
 /// `Some` when parsing succeeds.
 pub(crate) fn parse_snapshot_timestamp(name: &str) -> Option<DateTime<Utc>> {
-    let naive = chrono::NaiveDateTime::parse_from_str(name, "%Y-%m-%d_%H-%M-%S").ok()?;
-    Some(Utc.from_utc_datetime(&naive))
+    project_snapshot_cache::parse_snapshot_timestamp(name)
 }

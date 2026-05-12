@@ -19,7 +19,7 @@
     progressLog,
     refreshBackupStatus,
   } from "../../stores/backup";
-  import { refreshProjects, projects } from "../../stores/projects";
+  import { refreshProjects, refreshProjectsRemote, projects } from "../../stores/projects";
   import { shellKind } from "../../stores/shell";
   import * as commands from "../../lib/commands";
   import { relativeFromIso } from "../../lib/time";
@@ -76,8 +76,9 @@
       <p class="label-caps mb-2 text-[var(--muted)]">Overview</p>
       <h1 class="text-2xl font-semibold tracking-tight text-[var(--text)]">Projects & backup</h1>
       <p class="mt-2 max-w-xl text-[13px] text-[var(--muted2)]">
-        Snapshot interval is configurable; manual backups share the same in-process mutex as the tray and
-        scheduler.
+        Snapshot stats load from <strong class="font-semibold text-[var(--text)]">your Mac</strong> — last
+        counts from successful backups or when you sync while on the same network as the backup server.
+        Scheduler and manual backups still use SSH when you run them.
       </p>
     </div>
     <div class="flex flex-col items-end gap-3">
@@ -107,13 +108,23 @@
           <Layers size={14} aria-hidden="true" />
           {restoringAllProjects ? "Restoring…" : "Restore all projects"}
         </button>
-        <button
-          type="button"
-          class="ml-auto shrink-0 text-[11px] uppercase tracking-[0.14em] text-[var(--accent)] hover:text-[var(--accent-hover)]"
-          onclick={() => void refreshProjects()}
-        >
-          Refresh
-        </button>
+        <div class="ml-auto flex flex-wrap items-center gap-x-3 gap-y-2">
+          <button
+            type="button"
+            class="shrink-0 text-[11px] uppercase tracking-[0.14em] text-[var(--muted)] hover:text-[var(--accent)]"
+            onclick={() => void refreshProjects()}
+          >
+            Reload (cached)
+          </button>
+          <button
+            type="button"
+            class="shrink-0 text-[11px] uppercase tracking-[0.14em] text-[var(--accent)] hover:text-[var(--accent-hover)]"
+            onclick={() => void refreshProjectsRemote()}
+            title="Requires SSH to your backup host"
+          >
+            Sync from backup server
+          </button>
+        </div>
       </div>
       <div class="flex flex-col gap-3">
         {#if $projects.length === 0}

@@ -1,6 +1,6 @@
 /*
  * Purpose: Dashboard rows reflecting immediate children of `local.projects_path`.
- * Role: `refreshProjects` re-queries SSH-backed snapshot metadata through IPC.
+ * Role: `refreshProjects` loads cached snapshot stats only; `refreshProjectsRemote` probes SSH when online.
  */
 
 import { writable, type Writable } from "svelte/store";
@@ -13,13 +13,27 @@ import { showToast } from "./ui";
 export const projects: Writable<ProjectInfo[]> = writable([]);
 
 /**
- * Reloads project folders plus remote snapshot summaries.
+ * Reloads project folders plus snapshot stats from local disk cache only (no SSH).
  *
- * External: `commands.listProjects` performs filesystem enumeration + SSH probes.
+ * External: `commands.listProjects(false)` merges folders under `projects_path` with `snapshot_stats.json`.
  */
 export async function refreshProjects(): Promise<void> {
   try {
-    const rows = await commands.listProjects();
+    const rows = await commands.listProjects(false);
+    projects.set(rows);
+  } catch (err) {
+    showToast(String(err));
+  }
+}
+
+/**
+ * Probes the backup server over SSH and refreshes per-project snapshot counts when reachable.
+ *
+ * External: `commands.listProjects(true)` falls back to cache entries when SSH fails mid-listing.
+ */
+export async function refreshProjectsRemote(): Promise<void> {
+  try {
+    const rows = await commands.listProjects(true);
     projects.set(rows);
   } catch (err) {
     showToast(String(err));

@@ -95,17 +95,13 @@ Installable bundles are produced under `src-tauri/target/release/bundle/` accord
 
 Both helpers detect **apt**, **dnf**, **yum**, **pacman**, **zypper**, **apk** and expect **sudo** where installs require elevation.
 
-**Backup server** — installs **OpenSSH server** + **rsync**, enables **sshd**, **`PubkeyAuthentication yes`**, creates user **`backr`** (default) and the backup tree, and writes **`/etc/backr/host.toml`** (backup root + SSH user) so Backr can auto-open the **host dashboard** on this machine:
+**Backup server** — installs **OpenSSH server** + **rsync**, enables **sshd**, **`PubkeyAuthentication yes`**, creates user **`backr`** (default) and the backup tree:
 
 ```bash
 sudo ./scripts/setup-backup-host.sh --help
 ```
 
-The script finishes with a single status line — no manual checklist.
-
 **Dev laptop** — everything from **§2** (Tauri Linux deps, **Node.js** — NodeSource **22.x** on Debian/Ubuntu, **rustup** stable honoring **`src-tauri/Cargo.toml`** `rust-version`, **git**, **ssh/rsync**, **`npm ci`**) lives in **`setup-connecting-client.sh`**; run it **inside the cloned repo** after **§1**.
-
-**Host dashboard (optional)** — on the backup machine, install the app the same way as a dev laptop, then run **`npm run tauri:host`** or **`./scripts/run-host-dashboard.sh`**. If **`~/.config/backr/config.toml`** is absent but **`/etc/backr/host.toml`** exists (from the server setup script), the UI opens **`#/host`**: a read-only view of snapshot folders and disk space — similar layout to the laptop dashboard, without backup controls.
 
 Some enterprise **`yum`** images lack WebKitGTK **4.1** packages; use Fedora/Ubuntu/Arch or install [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) manually.
 
@@ -113,13 +109,15 @@ Some enterprise **`yum`** images lack WebKitGTK **4.1** packages; use Fedora/Ubu
 
 ## Configuration
 
-On first launch, Backr sends you through setup if no config exists **and** this machine is not marked as a backup host (see **`/etc/backr/host.toml`**). Settings are persisted as TOML at:
+On first launch, Backr sends you through setup if no config exists. Settings are persisted as TOML at:
 
 - **Unix:** `~/.config/backr/config.toml`
 
 Conceptually the file contains remote SSH targets, local `projects_path`, schedule `interval_hours`, and persisted `last_backup_at`. For a concrete schema and example values, see the inline documentation in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md) (implementation plan).
 
 SSH host keys for backup connections are tracked in `~/.config/backr/known_hosts` (isolated from your default `known_hosts`).
+
+Per-project snapshot counts and “last backup” labels on the **dashboard** are read from **`~/.config/backr/snapshot_stats.json`** by default (updated after each successful backup). When your laptop is away from the backup network, use **Sync from backup server** in the UI to refresh counts over SSH; browsing snapshot **contents** still requires connectivity.
 
 ---
 
@@ -134,7 +132,6 @@ SSH host keys for backup connections are tracked in `~/.config/backr/known_hosts
 | `npm run check` | `svelte-check` TypeScript/Svelte diagnostics. |
 | `npm run tauri:dev` | Tauri development window. |
 | `npm run tauri:dev:mock` | Tauri dev with mocked IPC backend. |
-| `npm run tauri:host` | Tauri dev forcing backup-host dashboard mode (`BACKR_HOST_MODE=1`). |
 | `npm run tauri:build` | Ship-ready desktop bundles. |
 
 ---

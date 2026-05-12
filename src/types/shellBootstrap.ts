@@ -1,10 +1,9 @@
 /*
- * Purpose: Discriminated union returned by `resolve_shell_bootstrap` for hash-router guards.
- * Role: Chooses setup wizard vs laptop client vs read-only backup-host dashboard.
+ * Purpose: JSON shape from `resolve_shell_bootstrap` for SPA routing on startup.
+ * Role: Chooses laptop setup wizard vs client dashboard vs backup-host dashboard mode.
  */
 
-/** Routing/bootstrap mode resolved once at shell startup (see `resolve_shell_bootstrap`). */
 export type ShellBootstrap =
   | { mode: "setup" }
   | { mode: "client" }
-  | { mode: "host"; backup_root: string; ssh_user?: string };
+  | { mode: "host"; backup_root: string; ssh_user?: string | null };

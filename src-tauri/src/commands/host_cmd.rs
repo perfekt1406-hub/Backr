@@ -1,20 +1,20 @@
 /*
- * Purpose: Read-only snapshot inspection for backup-host machines (local filesystem under backup_root).
- * Role: Powers `HostDashboardView` — listing projects + snapshots and coarse disk usage via `df`.
+ * Tauri commands for backup-host dashboard bootstrap plus local filesystem introspection.
  */
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::host_config::load_host_marker;
+use crate::host_config::read_host_dashboard_marker;
+use crate::project_snapshot_cache::parse_snapshot_timestamp;
 
-/// Bootstrap routing payload consumed by `App.svelte` before hash routing.
+/// JSON payload consumed by `resolve_shell_bootstrap` — determines initial router destination.
 #[derive(Debug, Serialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
-pub enum ShellBootstrapDto {
+pub enum ShellBootstrap {
     Setup,
     Client,
     Host {
@@ -24,161 +24,110 @@ pub enum ShellBootstrapDto {
     },
 }
 
-/// One snapshot directory under a project folder on the backup host.
+/// One project folder visible under `backup_root` with coarse snapshot stats from disk.
 #[derive(Debug, Serialize)]
-pub struct HostSnapshotRowDto {
-    pub id: String,
-    pub modified_iso: Option<String>,
-}
-
-/// One project (top-level directory under `backup_root`).
-#[derive(Debug, Serialize)]
-pub struct HostProjectRowDto {
+pub struct HostProjectRow {
     pub name: String,
-    pub snapshots: Vec<HostSnapshotRowDto>,
+    pub snapshot_count: usize,
+    pub last_backup_at: Option<DateTime<Utc>>,
 }
 
-/// Best-effort filesystem stats for the volume backing `backup_root` (Linux `df`).
+/// Volume summary for [`HostDashboardView`] chrome (`df` best-effort).
 #[derive(Debug, Serialize)]
-pub struct HostVolumeSummaryDto {
+pub struct HostVolumeSummary {
     pub backup_root: String,
     pub bytes_avail: Option<u64>,
     pub bytes_size: Option<u64>,
 }
 
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "TRUE" | "YES"))
-        .unwrap_or(false)
-}
-
-fn resolve_host_paths() -> Result<(PathBuf, Option<String>), String> {
-    let marker = load_host_marker()?;
-    let raw = std::env::var("BACKR_HOST_BACKUP_ROOT")
-        .ok()
-        .or_else(|| marker.as_ref().map(|m| m.backup_root.clone()))
-        .ok_or_else(|| {
-            String::from(
-                "host dashboard needs BACKR_HOST_BACKUP_ROOT or /etc/backr/host.toml backup_root",
-            )
-        })?;
-
-    let root = PathBuf::from(&raw);
-    let canon = root
-        .canonicalize()
-        .map_err(|e| format!("backup_root {raw}: {e}"))?;
-
-    let ssh_user = marker.and_then(|m| m.ssh_user);
-    Ok((canon, ssh_user))
-}
-
-/// Decides whether the UI should land on setup, normal client, or read-only host dashboard.
-///
-/// External: `std::env::var` reads optional overrides; [`crate::config::load_config`] checks laptop config.
+/// Chooses laptop setup vs client vs NAS-local dashboard before SPA routing completes.
 #[tauri::command]
-pub fn resolve_shell_bootstrap() -> Result<ShellBootstrapDto, String> {
-    if env_truthy("BACKR_HOST_MODE") {
-        let (root, ssh_user) = resolve_host_paths()?;
-        return Ok(ShellBootstrapDto::Host {
-            backup_root: root.to_string_lossy().into_owned(),
-            ssh_user,
-        });
-    }
-
-    let cfg = crate::config::load_config().map_err(|e| e.to_string())?;
-    if cfg.is_some() {
-        return Ok(ShellBootstrapDto::Client);
-    }
-
-    if let Some(marker) = load_host_marker()? {
-        let root = PathBuf::from(&marker.backup_root);
-        let canon = root
-            .canonicalize()
-            .map_err(|e| format!("backup_root {}: {e}", marker.backup_root))?;
-        return Ok(ShellBootstrapDto::Host {
-            backup_root: canon.to_string_lossy().into_owned(),
-            ssh_user: marker.ssh_user.clone(),
-        });
-    }
-
-    Ok(ShellBootstrapDto::Setup)
-}
-
-fn snapshot_mtime_iso(meta: &std::fs::Metadata) -> Option<String> {
-    let st = meta.modified().ok()?;
-    Some(DateTime::<Utc>::from(st).to_rfc3339())
-}
-
-/// Lists immediate project folders and nested snapshot directories under `backup_root`.
-///
-/// External: `std::fs::read_dir` enumerates directories; paths stay under canonical `backup_root`.
-#[tauri::command]
-pub fn host_list_snapshot_projects(backup_root: String) -> Result<Vec<HostProjectRowDto>, String> {
-    let root = PathBuf::from(&backup_root)
-        .canonicalize()
-        .map_err(|e| format!("backup_root {backup_root}: {e}"))?;
-
-    let mut projects = Vec::new();
-
-    for ent in std::fs::read_dir(&root).map_err(|e| format!("read_dir {}: {e}", root.display()))? {
-        let ent = ent.map_err(|e| format!("read_dir entry: {e}"))?;
-        let ft = ent.file_type().map_err(|e| format!("file_type: {e}"))?;
-        if !ft.is_dir() {
-            continue;
-        }
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-
-        let proj_path = root.join(&name);
-        let mut snapshots = Vec::new();
-
-        for snap in std::fs::read_dir(&proj_path)
-            .map_err(|e| format!("read_dir {}: {e}", proj_path.display()))?
-        {
-            let snap = snap.map_err(|e| format!("snapshot entry: {e}"))?;
-            let sft = snap.file_type().map_err(|e| format!("snapshot type: {e}"))?;
-            if !sft.is_dir() {
-                continue;
-            }
-            let sid = snap.file_name().to_string_lossy().into_owned();
-            if sid.starts_with('.') {
-                continue;
-            }
-            let meta = snap.metadata().map_err(|e| format!("snapshot meta: {e}"))?;
-            snapshots.push(HostSnapshotRowDto {
-                id: sid,
-                modified_iso: snapshot_mtime_iso(&meta),
+pub fn resolve_shell_bootstrap() -> Result<ShellBootstrap, String> {
+    if let Some(marker) = read_host_dashboard_marker() {
+        let root = Path::new(&marker.backup_root);
+        if root.is_dir() {
+            return Ok(ShellBootstrap::Host {
+                backup_root: marker.backup_root,
+                ssh_user: marker.ssh_user,
             });
         }
-
-        snapshots.sort_by(|a, b| b.id.cmp(&a.id));
-        projects.push(HostProjectRowDto { name, snapshots });
+        tracing::warn!(
+            "host_dashboard marker present but backup_root is not a directory: {}",
+            marker.backup_root
+        );
     }
 
-    projects.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(projects)
+    match crate::config::load_config() {
+        Ok(Some(_)) => Ok(ShellBootstrap::Client),
+        Ok(None) => Ok(ShellBootstrap::Setup),
+        Err(err) => {
+            tracing::warn!("resolve_shell_bootstrap: load_config failed: {err}");
+            Ok(ShellBootstrap::Setup)
+        }
+    }
 }
 
-/// Parses `df --output=avail,size` for the volume holding `backup_root` (GNU coreutils).
-///
-/// External: `std::process::Command` runs `/usr/bin/df`; returns `None` fields when parsing fails.
+fn snapshot_dirs(project_path: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(project_path) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = rd
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| parse_snapshot_timestamp(n).is_some())
+        .collect();
+    names.sort_by(|a, b| b.cmp(a));
+    names
+}
+
+/// Lists projects by scanning `backup_root/<project>/<snapshot>/` locally on the NAS machine.
 #[tauri::command]
-pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummaryDto, String> {
-    let root = PathBuf::from(&backup_root)
-        .canonicalize()
-        .map_err(|e| format!("backup_root {backup_root}: {e}"))?;
+pub fn host_list_snapshot_projects(backup_root: String) -> Result<Vec<HostProjectRow>, String> {
+    let base = Path::new(&backup_root);
+    if !base.is_dir() {
+        return Err(format!("backup_root is not a directory: {}", backup_root));
+    }
+
+    let mut names: Vec<String> = std::fs::read_dir(base)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+
+    let mut out = Vec::new();
+    for name in names {
+        let project_path = base.join(&name);
+        let snaps = snapshot_dirs(&project_path);
+        let last = snaps.first().and_then(|s| parse_snapshot_timestamp(s));
+        out.push(HostProjectRow {
+            name,
+            snapshot_count: snaps.len(),
+            last_backup_at: last,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Parses `df -B1` for the filesystem backing `backup_root`.
+#[tauri::command]
+pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, String> {
+    let path = Path::new(&backup_root);
+    if !path.exists() {
+        return Err(format!("backup_root does not exist: {}", backup_root));
+    }
 
     let out = Command::new("df")
-        .args(["-B1", "--output=avail,size", "--"])
-        .arg(&root)
+        .args(["-B1", "--output=avail,size", backup_root.as_str()])
         .output()
-        .map_err(|e| format!("df: {e}"))?;
+        .map_err(|e| e.to_string())?;
 
     if !out.status.success() {
-        return Ok(HostVolumeSummaryDto {
-            backup_root: root.to_string_lossy().into_owned(),
+        return Ok(HostVolumeSummary {
+            backup_root,
             bytes_avail: None,
             bytes_size: None,
         });
@@ -186,21 +135,15 @@ pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummaryDto, 
 
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines();
-    let _header = lines.next();
-    let mut bytes_avail = None;
-    let mut bytes_size = None;
-    for line in lines {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            bytes_avail = parts[0].parse::<u64>().ok();
-            bytes_size = parts[1].parse::<u64>().ok();
-            break;
-        }
-    }
+    lines.next(); // header
+    let line = lines.next().unwrap_or("");
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let avail = cols.first().and_then(|s| s.parse::<u64>().ok());
+    let size = cols.get(1).and_then(|s| s.parse::<u64>().ok());
 
-    Ok(HostVolumeSummaryDto {
-        backup_root: root.to_string_lossy().into_owned(),
-        bytes_avail,
-        bytes_size,
+    Ok(HostVolumeSummary {
+        backup_root,
+        bytes_avail: avail,
+        bytes_size: size,
     })
 }

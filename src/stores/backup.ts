@@ -7,6 +7,7 @@ import { writable, type Writable } from "svelte/store";
 
 import * as commands from "../lib/commands";
 import type { BackupStatus } from "../types/project";
+import { refreshProjects } from "./projects";
 import { showToast } from "./ui";
 
 /** Mutex / schedule snapshot from Rust `AppState`. */
@@ -42,6 +43,7 @@ export async function requestBackup(project?: string): Promise<void> {
   try {
     await commands.runBackup(project);
     await refreshBackupStatus();
+    await refreshProjects();
   } catch (err) {
     showToast(String(err));
   }

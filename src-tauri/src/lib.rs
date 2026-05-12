@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod host_config;
 pub mod progress_sink;
+pub mod project_snapshot_cache;
 pub mod scheduler;
 pub mod state;
 pub mod tray;

@@ -1,37 +1,92 @@
 /*
- * Purpose: Reads `/etc/backr/host.toml` marker written by setup-backup-host.sh.
- * Role: Enables host-dashboard mode on backup servers without a Backr client config file.
+ * Purpose: Detect whether this Backr instance should boot into backup-host dashboard mode.
+ * Role: Reads `/etc/backr/host.toml` (NAS setup script), optional user config copy, or env overrides.
  */
 
-use std::path::Path;
-
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
-/// Path where `setup-backup-host.sh` drops machine-readable backup-root metadata.
-pub const HOST_MARKER_PATH: &str = "/etc/backr/host.toml";
+use crate::config::config_path;
+use crate::error::BackrError;
 
-/// Parsed host marker — minimal fields for dashboard reads (SSH user is informational only).
-#[derive(Debug, Clone, Deserialize)]
-pub struct HostMarkerFile {
+/// Host-dashboard bootstrap descriptor (local snapshot tree root).
+#[derive(Debug, Clone)]
+pub struct HostDashboardMarker {
     pub backup_root: String,
     pub ssh_user: Option<String>,
 }
 
-/// Loads `/etc/backr/host.toml` when present and readable.
+#[derive(Debug, Deserialize)]
+struct HostDashboardToml {
+    backup_root: String,
+    #[serde(default)]
+    ssh_user: Option<String>,
+}
+
+fn parse_host_toml(raw: &str) -> Option<HostDashboardMarker> {
+    let parsed: HostDashboardToml = toml::from_str(raw).ok()?;
+    let backup_root = parsed.backup_root.trim().to_string();
+    if backup_root.is_empty() {
+        return None;
+    }
+    Some(HostDashboardMarker {
+        backup_root,
+        ssh_user: parsed.ssh_user,
+    })
+}
+
+/// Optional marker beside laptop `config.toml` for developers testing host UI.
+fn user_host_marker_path() -> Result<PathBuf, BackrError> {
+    let mut p = config_path()?;
+    p.pop();
+    Ok(p.join("host_dashboard.toml"))
+}
+
+/// Returns host mode metadata when env, `/etc/backr/host.toml`, or user marker is present.
 ///
 /// # Returns
 ///
-/// `Ok(None)` when missing; `Ok(Some)` when parsed; `Err` on unreadable or invalid TOML.
-///
-/// External: `toml::from_str` deserializes TOML text into [`HostMarkerFile`].
-pub fn load_host_marker() -> Result<Option<HostMarkerFile>, String> {
-    let path = Path::new(HOST_MARKER_PATH);
-    if !path.exists() {
-        return Ok(None);
+/// `None` when the laptop client flow should run (`config.toml` wizard path).
+pub fn read_host_dashboard_marker() -> Option<HostDashboardMarker> {
+    if let Ok(root) = std::env::var("BACKR_HOST_BACKUP_ROOT")
+        .or_else(|_| std::env::var("BACKR_HOST_DASHBOARD_ROOT"))
+    {
+        let trimmed = root.trim().to_string();
+        if !trimmed.is_empty() && Path::new(&trimmed).is_absolute() {
+            let ssh_user = std::env::var("BACKR_HOST_SSH_USER")
+                .ok()
+                .filter(|s| !s.trim().is_empty());
+            return Some(HostDashboardMarker {
+                backup_root: trimmed,
+                ssh_user,
+            });
+        }
     }
-    let raw =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", HOST_MARKER_PATH))?;
-    let marker: HostMarkerFile =
-        toml::from_str(&raw).map_err(|e| format!("parse {}: {e}", HOST_MARKER_PATH))?;
-    Ok(Some(marker))
+
+    if let Ok(raw) = std::fs::read_to_string("/etc/backr/host.toml") {
+        if let Some(marker) = parse_host_toml(&raw) {
+            let root = Path::new(&marker.backup_root);
+            if root.is_dir() {
+                return Some(marker);
+            }
+            tracing::warn!(
+                "host.toml backup_root is not a directory: {}",
+                marker.backup_root
+            );
+        }
+    }
+
+    let path = user_host_marker_path().ok()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let marker = parse_host_toml(&raw)?;
+    let root = Path::new(&marker.backup_root);
+    if root.is_dir() {
+        return Some(marker);
+    }
+    tracing::warn!(
+        "host_dashboard.toml backup_root is not a directory: {}",
+        marker.backup_root
+    );
+
+    None
 }
