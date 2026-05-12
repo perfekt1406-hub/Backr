@@ -39,7 +39,7 @@ The remote backup host must accept SSH public-key authentication and provide `rs
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/perfekt1406-hub/backr.git
+git clone https://github.com/perfekt1406-hub/Backr.git
 cd backr
 npm install
 ```
