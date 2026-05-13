@@ -137,7 +137,7 @@ On first launch, Backr sends you through setup if no config exists. Settings are
 
 - **Unix:** `~/.config/backr/config.toml`
 
-Conceptually the file contains remote SSH targets, local `projects_path`, schedule `interval_hours`, and persisted `last_backup_at`. For a concrete schema and example values, see the inline documentation in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md) (implementation plan).
+Conceptually the file contains remote SSH targets, local `projects_path`, schedule `interval_hours`, and persisted `last_backup_at`. Field-level shape is defined in the Rust `Config` types under `src-tauri/src/config.rs`.
 
 SSH host keys for backup connections are tracked in `~/.config/backr/known_hosts` (isolated from your default `known_hosts`).
 
@@ -168,7 +168,7 @@ Per-project snapshot counts and “last backup” labels on the **dashboard** ar
 | `src-tauri/` | Rust crate: config, scheduler, tray, rsync/SSH backup, Tauri commands. |
 | `scripts/` | `setup-backup-host.sh` & `setup-connecting-client.sh`: bootstrap + optional **questionnaires** → **tailored next steps**; laptop script offers **`ssh-copy-id`** by default when **`--backup-host`** probe fails (unless **`--no-ssh-copy-id`**); Trust keys **`#/host/trust`** as fallback; **`--non-interactive`** skips prompts (pipes/CI). |
 
-UI design notes can live in `brand-aesthetic.md` locally (that filename is gitignored). A deeper technical plan and remote snapshot layout are documented in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md).
+UI design notes can live in `brand-aesthetic.md` locally (that filename is gitignored).
 
 ---
 
@@ -176,7 +176,7 @@ UI design notes can live in `brand-aesthetic.md` locally (that filename is gitig
 
 - **Tauri:** [Tauri 2 documentation](https://v2.tauri.app/)
 - **Svelte / Vite:** [Svelte](https://svelte.dev/docs/svelte/overview), [Vite](https://vite.dev/guide/)
-- **This repo:** Use the implementation plan and brand docs linked above for architecture and UX intent.
+- **This repo:** Browse `src-tauri/` and `src/` for behavior; use local `brand-aesthetic.md` for UX notes if present.
 
 If the project is hosted on GitHub or another forge, use **Issues** for bugs and feature discussion once those are enabled.
 
