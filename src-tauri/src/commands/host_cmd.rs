@@ -269,3 +269,21 @@ pub async fn host_disk_inventory(
     .await
     .map_err(|e| format!("disk inventory task failed: {e}"))?
 }
+
+/// Reports authorized_keys path + pubkey count for the backup SSH account (host Trust page).
+///
+/// External: delegates to [`crate::host_trust::host_trust_status_impl`] (inputs: none; outputs: [`crate::host_trust::HostTrustStatus`]).
+#[tauri::command]
+pub fn host_trust_status() -> Result<crate::host_trust::HostTrustStatus, String> {
+    crate::host_trust::host_trust_status_impl()
+}
+
+/// Appends one validated pubkey line to authorized_keys, or returns sudo fallback commands for the operator.
+///
+/// External: delegates to [`crate::host_trust::host_append_authorized_pubkey_impl`] (inputs: pubkey text; outputs: [`crate::host_trust::HostTrustAppendResult`]).
+#[tauri::command]
+pub fn host_append_authorized_pubkey(
+    pubkey_line: String,
+) -> Result<crate::host_trust::HostTrustAppendResult, String> {
+    crate::host_trust::host_append_authorized_pubkey_impl(pubkey_line)
+}

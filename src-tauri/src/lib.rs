@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod host_config;
 pub mod host_disk_inventory;
+pub mod host_trust;
 pub mod progress_sink;
 pub mod project_snapshot_cache;
 pub mod scheduler;
@@ -83,6 +84,8 @@ pub fn run() {
             commands::host_cmd::host_list_snapshot_projects,
             commands::host_cmd::host_volume_summary,
             commands::host_cmd::host_disk_inventory,
+            commands::host_cmd::host_trust_status,
+            commands::host_cmd::host_append_authorized_pubkey,
             commands::system_cmd::get_system_info,
             commands::project_cmd::list_projects,
             commands::project_cmd::get_backup_status,

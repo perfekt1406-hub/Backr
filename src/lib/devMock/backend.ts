@@ -9,6 +9,7 @@ import type {
   HostProjectRow,
   HostVolumeSummary,
 } from "../../types/hostDashboard";
+import type { HostTrustAppendResult, HostTrustStatus } from "../../types/hostTrust";
 import type { Config } from "../../types/config";
 import type { BackupStatus, ProjectInfo } from "../../types/project";
 import type { ShellBootstrap } from "../../types/shellBootstrap";
@@ -47,6 +48,9 @@ let activeProject: string | null = null;
 /** Rolling markers feeding `get_activity_series`. */
 let activityHistory: ActivityPoint[] = [...seedActivityPoints()];
 
+/** Simulated authorized_keys line count for host Trust-keys IPC mocks. */
+let mockTrustPubkeyLineCount = 0;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -63,6 +67,7 @@ export function resetDevMockState(): void {
   backupRunning = false;
   activeProject = null;
   activityHistory = [...seedActivityPoints()];
+  mockTrustPubkeyLineCount = 0;
 }
 
 /** Returns optional persisted config — mock mode always supplies a concrete document. */
@@ -325,5 +330,50 @@ export async function mockHostDiskInventory(
     projects: sized,
     from_cache: !forceRefresh,
     scanned_at: new Date().toISOString(),
+  };
+}
+
+/**
+ * Mock Trust-keys status for the backup-host dashboard in dev mock mode.
+ *
+ * External: mirrors `host_trust_status` IPC without reading disk.
+ */
+export async function mockHostTrustStatus(): Promise<HostTrustStatus> {
+  await delay(40);
+  return {
+    ssh_user: DEV_MOCK_HOST_SSH_USER,
+    authorized_keys_path: `/home/${DEV_MOCK_HOST_SSH_USER}/.ssh/authorized_keys`,
+    pubkey_line_count: mockTrustPubkeyLineCount,
+  };
+}
+
+/**
+ * Mock Trust-keys append — accepts plausible OpenSSH key prefixes.
+ *
+ * External: mirrors `host_append_authorized_pubkey` IPC shape; updates [`mockTrustPubkeyLineCount`].
+ */
+export async function mockHostAppendAuthorizedPubkey(
+  pubkeyLine: string,
+): Promise<HostTrustAppendResult> {
+  await delay(120);
+  const line = pubkeyLine.trim();
+  const looksOk =
+    /^(ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519|sk-ecdsa-sha2-nistp256)\s+\S/.test(
+      line,
+    );
+  if (!looksOk) {
+    return {
+      appended: false,
+      skipped_duplicate: false,
+      pubkey_line_count: mockTrustPubkeyLineCount,
+      message: "Invalid OpenSSH public key line (mock)",
+    };
+  }
+  mockTrustPubkeyLineCount += 1;
+  return {
+    appended: true,
+    skipped_duplicate: false,
+    pubkey_line_count: mockTrustPubkeyLineCount,
+    message: "Appended (mock)",
   };
 }

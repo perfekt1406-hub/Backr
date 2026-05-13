@@ -3,7 +3,7 @@
   Role: Persistent shell chrome—IBM Plex Mono stack and token-driven borders per `brand-aesthetic.md`.
 -->
 <script lang="ts">
-  import { HardDrive, FolderGit2, Radar, Settings2 } from "lucide-svelte";
+  import { HardDrive, FolderGit2, KeyRound, Radar, Settings2 } from "lucide-svelte";
   import { link } from "svelte-spa-router";
 
   import { switchDevDashboard, devShellToggleEnabled } from "../../lib/devShellDashboard";
@@ -90,6 +90,14 @@
       >
         <HardDrive size={18} class="text-[var(--accent)]" aria-hidden="true" />
         Storage
+      </a>
+      <a
+        href="/host/trust"
+        class="flex items-center gap-2 rounded-[5px] px-3 py-2 text-[var(--text)] transition-colors hover:bg-[var(--bg3)] hover:text-[var(--accent-hover)]"
+        use:link
+      >
+        <KeyRound size={18} class="text-[var(--accent)]" aria-hidden="true" />
+        Trust keys
       </a>
     {:else if $shellKind === "setup"}
       <a

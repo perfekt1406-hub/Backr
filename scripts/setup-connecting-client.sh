@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
 # Purpose: Prepare a Linux machine for Backr — by default installs deps, builds the desktop AppImage from this repo,
-#          registers it under ~/.local/share (launcher menu entry), and optionally walks through a short questionnaire so
-#          «unknown» networking/server facts become concrete next-step instructions at the end.
+#          registers it under ~/.local/share (launcher menu entry), and optionally walks through two setup questions plus terms for SSH keys.
 # Role: Distro-aware OS packages for Tauri (WebKitGTK, SSL, build tools), Node.js LTS,
 #       Rust via rustup (respecting src-tauri/Cargo.toml rust-version), OpenSSH client + rsync, git/curl;
 #       npm ci/npm install; optional projects dir + SSH key; npm run tauri:build + AppImage install unless --deps-only;
-#       optional interactive questionnaire (installs dialog/whiptail-style TUI when missing for arrow-key menus) +
-#       tailored «next steps» when /dev/tty exists.
+#       minimal questionnaire (OpenClaw-style @clack/prompts when Node + deps exist; else dialog / typed fallback):
+#       SSH port + optional backup host; default ssh-copy-id when --backup-host BatchMode probe fails (Trust keys fallback),
+#       tailored hints when /dev/tty exists.
 #
 # Run from anywhere with sudo available when elevated installs are needed:
 #   ./scripts/setup-connecting-client.sh [options]
@@ -16,7 +16,12 @@
 #   --projects-dir PATH            Local folder containing one subdirectory per project (default: ~/Projects).
 #   --skip-keygen                  Do not offer to create ~/.ssh/id_ed25519 if missing.
 #   --backup-host TARGET           After setup: probe pubkey SSH to TARGET (host/IP or user@host; default user backr).
-#                                  If login fails, prints your pubkey and the exact BACKR_AUTHORIZED_KEYS curl line — no passwords.
+#                                  If login fails interactively, offers ssh-copy-id (you type SSH password once at the prompt).
+#                                  Otherwise prints Trust keys (#/host/trust) / authorized_keys hints.
+#   --ssh-port N                   Use TCP port N for --backup-host probes and ssh-copy-id (non-interactive pairing without the questionnaire).
+#   --auto-ssh-key                 Create ~/.ssh/id_ed25519 when missing without prompting (use with CI or --non-interactive).
+#   --yes-ssh-copy-id              When pubkey probe fails, run ssh-copy-id immediately without the Y/n confirmation (password still typed by OpenSSH).
+#   --no-ssh-copy-id               After setup: skip ssh-copy-id offer (Trust-keys hints only when probe fails).
 #   --deps-only                    Install toolchain and npm deps only (no AppImage build / menu install); use for dev.
 #   --install-appimage             Same as default (explicit): build AppImage locally and install launcher entry.
 #   --install-appimage-build       Same as default (explicit).
@@ -25,14 +30,21 @@
 #   -h, --help                     Show this text.
 #
 # Environment:
-#   BACKR_BACKUP_HOST       Same as --backup-host (e.g. backr@192.168.1.10 or 192.168.1.10).
-#   BACKR_NON_INTERACTIVE=1 Same as --non-interactive.
+#   BACKR_BACKUP_HOST        Same as --backup-host (e.g. backr@192.168.1.10 or 192.168.1.10).
+#   BACKR_SSH_PORT             Same as --ssh-port (digits only; used for BatchMode probe + ssh-copy-id).
+#   BACKR_SETUP_PUBKEY_LINE    Optional single-line OpenSSH pubkey (non-interactive paste trust hints without prompts).
+#   BACKR_NO_SSH_COPY_ID=1     Same as --no-ssh-copy-id (no ssh-copy-id prompt when BatchMode probe fails).
+#   BACKR_YES_SSH_COPY_ID=1    Same as --yes-ssh-copy-id (skip confirmation before ssh-copy-id).
+#   BACKR_AUTO_SSH_KEY=1       Same as --auto-ssh-key (create Ed25519 key without prompting when missing).
+#   BACKR_NON_INTERACTIVE=1    Same as --non-interactive.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
 SKIP_KEYGEN=0
+# When 1, skip interactive ssh-copy-id after failed BatchMode probe (see BACKR_NO_SSH_COPY_ID).
+SKIP_SSH_COPY_ID="${BACKR_NO_SSH_COPY_ID:-0}"
 # Exclusive setup goal: build (default) | deps | download — see set_setup_kind().
 SETUP_KIND=""
 APPIMAGE_URL_OVERRIDE=""
@@ -45,8 +57,15 @@ SURVEY_CLIENT_SERVER_READY="${SURVEY_CLIENT_SERVER_READY:-unknown}"
 SURVEY_CLIENT_SSH_PORT="${SURVEY_CLIENT_SSH_PORT:-unknown}"
 SURVEY_CLIENT_SSH_CUSTOM_PORT="${SURVEY_CLIENT_SSH_CUSTOM_PORT:-}"
 SURVEY_CLIENT_HOST_PLAN="${SURVEY_CLIENT_HOST_PLAN:-unknown}"
+BACKR_SETUP_PUBKEY_LINE="${BACKR_SETUP_PUBKEY_LINE:-}"
 
 APT_UPDATED=0
+# Automation helpers (see maybe_create_ssh_key / verify_pubkey_ssh_or_print_bootstrap_line).
+AUTO_SSH_KEY=0
+YES_SSH_COPY_ID=0
+CLI_SSH_PORT=""
+[[ "${BACKR_AUTO_SSH_KEY:-0}" == "1" ]] && AUTO_SSH_KEY=1
+[[ "${BACKR_YES_SSH_COPY_ID:-0}" == "1" ]] && YES_SSH_COPY_ID=1
 
 die() {
   echo "error: $*" >&2
@@ -54,7 +73,7 @@ die() {
 }
 
 usage() {
-  sed -n '1,28p' "$0" | tail -n +2
+  sed -n '2,39p' "$0"
 }
 
 #
@@ -87,6 +106,23 @@ parse_args() {
         BACKUP_SSH_TARGET="${2:-}"
         [[ -n "$BACKUP_SSH_TARGET" ]] || die "--backup-host needs a value"
         shift 2
+        ;;
+      --ssh-port)
+        CLI_SSH_PORT="${2:-}"
+        [[ -n "$CLI_SSH_PORT" ]] || die "--ssh-port needs a value"
+        shift 2
+        ;;
+      --auto-ssh-key)
+        AUTO_SSH_KEY=1
+        shift
+        ;;
+      --yes-ssh-copy-id)
+        YES_SSH_COPY_ID=1
+        shift
+        ;;
+      --no-ssh-copy-id)
+        SKIP_SSH_COPY_ID=1
+        shift
         ;;
       --deps-only)
         set_setup_kind deps
@@ -122,10 +158,23 @@ parse_args() {
 }
 
 #
-# Prints lines to /dev/tty when stdin may not be interactive (e.g. nested tooling).
+# Inputs: message lines as arguments. Outputs: writes each line to /dev/tty, or stderr if /dev/tty is not writable.
+# External: printf writes text (inputs: format + args; outputs: bytes to redirected fd).
 #
 survey_print_tty_client() {
-  printf '%s\n' "$@" >/dev/tty
+  local line
+  for line in "$@"; do
+    printf '%s\n' "$line" >/dev/tty 2>/dev/null || printf '%s\n' "$line" >&2
+  done
+}
+
+#
+# Inputs: none. Outputs: returns 0 when this process can open /dev/tty read-write (usable questionnaire session).
+# Notes: [[ -c /dev/tty ]] is insufficient on headless contexts — probe open instead (same as backup-host helper).
+#
+survey_tty_is_usable_client() {
+  ( exec 3<>/dev/tty ) 2>/dev/null || return 1
+  return 0
 }
 
 #
@@ -139,6 +188,7 @@ ensure_survey_tui_pkg_connecting() {
   [[ "$(uname -s)" == "Linux" ]] || return 1
   local backend
   backend="$(detect_pkg_backend)"
+  printf '%s\n' "Backr: installing «dialog» for interactive setup prompts (backend: ${backend})…" >&2
   case "$backend" in
     apt)
       apt_update_once
@@ -169,16 +219,18 @@ ensure_survey_tui_pkg_connecting() {
 }
 
 #
-# Inputs: $1 question text, $2–$4 three option strings (fourth is always «I don't know»).
+# Inputs: $1 question text, $2–$4 three option strings (fourth is always «I'll set it up myself»).
 # Outputs: single digit 1–4 on stdout (defaults to 4 on cancel/invalid); uses dialog or whiptail on /dev/tty when available.
 #
 survey_read_menu_4_client() {
   local title="$1" o1="$2" o2="$3" o3="$4"
   local line="" choice="" mh=22 mw=78 ih=10
 
+  export TERM="${TERM:-xterm-256color}"
+
   if command -v dialog &>/dev/null; then
     choice="$(dialog --stdout --clear --title "Backr setup" --menu "$title" "$mh" "$mw" "$ih" \
-      1 "$o1" 2 "$o2" 3 "$o3" 4 "I don't know" \
+      1 "$o1" 2 "$o2" 3 "$o3" 4 "I'll set it up myself" \
       </dev/tty 2>/dev/tty)" || choice=""
     choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
     [[ "$choice" =~ ^[1-4]$ ]] || choice=4
@@ -189,7 +241,7 @@ survey_read_menu_4_client() {
   if command -v whiptail &>/dev/null; then
     export TERM="${TERM:-xterm-256color}"
     choice="$(whiptail --title "Backr setup" --menu "$title" "$mh" "$mw" "$ih" \
-      "1" "$o1" "2" "$o2" "3" "$o3" "4" "I don't know" \
+      "1" "$o1" "2" "$o2" "3" "$o3" "4" "I'll set it up myself" \
       3>&1 1>&2 2>&3 </dev/tty)" || choice=""
     choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
     [[ "$choice" =~ ^[1-4]$ ]] || choice=4
@@ -202,7 +254,7 @@ survey_read_menu_4_client() {
   survey_print_tty_client "  1) $o1"
   survey_print_tty_client "  2) $o2"
   survey_print_tty_client "  3) $o3"
-  survey_print_tty_client "  4) I don't know"
+  survey_print_tty_client "  4) I'll set it up myself"
   survey_print_tty_client "Choice [1-4]:"
   read -r line </dev/tty 2>/dev/null || line=""
   line="$(printf '%s' "$line" | tr -d '[:space:]')"
@@ -211,38 +263,73 @@ survey_read_menu_4_client() {
 }
 
 #
+# Inputs: none — writes SURVEY_CLIENT_* via Node @clack/prompts into a temp env file and sources it.
+# Outputs: returns 0 when the wizard completes; non-zero when Node/clack unavailable or wizard errors.
+# External: Node runs scripts/backr-connecting-survey.mjs (inputs: --env-file and backup hints; outputs: export lines).
+#
+run_connecting_client_questionnaire_clack() {
+  local env_out=""
+  env_out="$(mktemp)"
+  # External: node executes the ESM survey script (inputs: argv; outputs: env file + exit status).
+  if node "$REPO_ROOT/scripts/backr-connecting-survey.mjs" \
+    --env-file "$env_out" \
+    --backup-target-cli="${BACKUP_SSH_TARGET:-}" \
+    --backup-target-env="${BACKR_BACKUP_HOST:-}"; then
+    # shellcheck disable=SC1090
+    source "$env_out"
+    rm -f "$env_out"
+    return 0
+  fi
+  rm -f "$env_out"
+  return 1
+}
+
+#
+# Inputs: none. Outputs: runs the Clack wizard when prerequisites exist; otherwise returns non-zero so bash can fall back.
+#
+run_connecting_client_questionnaire_try_clack() {
+  [[ -f "$REPO_ROOT/scripts/backr-connecting-survey.mjs" ]] || return 1
+  command -v node &>/dev/null || return 1
+  [[ -d "$REPO_ROOT/node_modules/@clack/prompts" ]] || return 1
+  run_connecting_client_questionnaire_clack
+}
+
+#
 # Outputs: fills SURVEY_CLIENT_*; may set BACKUP_SSH_TARGET when user types host/IP.
+# Skips when BACKR_NON_INTERACTIVE or when no usable TTY (see emit_connecting_client_custom_next_steps).
 #
 run_connecting_client_questionnaire() {
   [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]] && return 0
-  [[ -c /dev/tty ]] || {
+  if ! survey_tty_is_usable_client; then
     SURVEY_SKIP_NO_TTY=1
     return 0
-  }
+  fi
+
+  if [[ ! -t 0 ]]; then
+    exec </dev/tty 2>/dev/null || true
+  fi
+
+  export TERM="${TERM:-xterm-256color}"
+
+  if run_connecting_client_questionnaire_try_clack; then
+    return 0
+  fi
+
+  survey_print_tty_client ""
+  survey_print_tty_client "Using basic terminal prompts (install wizard deps failed or Node unavailable)."
+  survey_print_tty_client ""
 
   local c="" line=""
+  survey_print_tty_client "=== Backr laptop — 2 quick questions ==="
+  survey_print_tty_client "SSH «public key» = one line in ~/.ssh/id_ed25519.pub (safe to copy). «Trust keys» = Backr paste screen on the backup machine (#/host/trust). Private key stays on this laptop."
   survey_print_tty_client ""
-  survey_print_tty_client "=== Backr laptop — quick questionnaire ==="
-  survey_print_tty_client "Option 4 is always «I don't know» — you’ll get discovery-style instructions at the end."
-  survey_print_tty_client ""
-  ensure_survey_tui_pkg_connecting 2>/dev/null || true
+  ensure_survey_tui_pkg_connecting || survey_print_tty_client "(Could not install «dialog» — using simple typed 1–4 prompts instead.)"
+
+  SURVEY_CLIENT_NETWORK=unknown
+  SURVEY_CLIENT_SERVER_READY=unknown
 
   c="$(survey_read_menu_4_client \
-    "How will this laptop usually reach the backup server?" \
-    "Same LAN (home/office Wi‑Fi or Ethernet)" \
-    "Over the internet (public hostname/IP or port-forward)" \
-    "VPN first, then private addresses")"
-  case "$c" in 1) SURVEY_CLIENT_NETWORK=lan ;; 2) SURVEY_CLIENT_NETWORK=internet ;; 3) SURVEY_CLIENT_NETWORK=vpn ;; *) SURVEY_CLIENT_NETWORK=unknown ;; esac
-
-  c="$(survey_read_menu_4_client \
-    "Has setup-backup-host.sh already been run successfully on the backup machine?" \
-    "Yes" \
-    "Not yet" \
-    "Someone else manages that server")"
-  case "$c" in 1) SURVEY_CLIENT_SERVER_READY=yes ;; 2) SURVEY_CLIENT_SERVER_READY=no ;; 3) SURVEY_CLIENT_SERVER_READY=other ;; *) SURVEY_CLIENT_SERVER_READY=unknown ;; esac
-
-  c="$(survey_read_menu_4_client \
-    "Which SSH port does the backup server's sshd listen on (same port you'll use from here)?" \
+    "Which SSH port does the backup server's sshd listen on (from here)?" \
     "Default 22" \
     "Custom — you'll type the port next" \
     "I'll figure it out after testing connectivity")"
@@ -268,34 +355,20 @@ run_connecting_client_questionnaire() {
       ;;
   esac
 
-  c="$(survey_read_menu_4_client \
-    "Do you already know the backup SSH target (hostname or IP) for testing?" \
-    "Yes — I'll type it now (defaults UNIX user backr if you omit user@)" \
-    "I'll use BACKR_BACKUP_HOST or --backup-host on a later run" \
-    "Already passed via this command line / env")"
-  case "$c" in
-    1)
+  if [[ -n "${BACKUP_SSH_TARGET:-}" ]] || [[ -n "${BACKR_BACKUP_HOST:-}" ]]; then
+    SURVEY_CLIENT_HOST_PLAN=cli_ok
+    survey_print_tty_client "Backup host already set from --backup-host or BACKR_BACKUP_HOST — skipping host prompt."
+  else
+    survey_print_tty_client "Backup SSH host for testing after setup (optional). Examples: 192.168.1.50 or backr@nas — empty to skip:"
+    read -r line </dev/tty 2>/dev/null || line=""
+    line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [[ -n "$line" ]]; then
+      BACKUP_SSH_TARGET="$line"
       SURVEY_CLIENT_HOST_PLAN=typed_now
-      survey_print_tty_client "Enter backup host (examples: 192.168.1.50 or backr@nas.local):"
-      read -r line </dev/tty 2>/dev/null || line=""
-      line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-      [[ -n "$line" ]] && BACKUP_SSH_TARGET="$line"
-      ;;
-    2)
+    else
       SURVEY_CLIENT_HOST_PLAN=defer
-      ;;
-    3)
-      if [[ -n "$BACKUP_SSH_TARGET" ]] || [[ -n "${BACKR_BACKUP_HOST:-}" ]]; then
-        SURVEY_CLIENT_HOST_PLAN=cli_ok
-      else
-        SURVEY_CLIENT_HOST_PLAN=unknown
-        survey_print_tty_client "(Nothing set yet — choose 1 or 2 next time, or pass --backup-host now.)"
-      fi
-      ;;
-    *)
-      SURVEY_CLIENT_HOST_PLAN=unknown
-      ;;
-  esac
+    fi
+  fi
 
   survey_print_tty_client ""
   survey_print_tty_client "Thanks — continuing setup…"
@@ -314,7 +387,7 @@ emit_connecting_client_custom_next_steps() {
 • --non-interactive / BACKR_NON_INTERACTIVE skipped the questionnaire.
 
   Run interactively (./scripts/setup-connecting-client.sh without --non-interactive) for tailored hints.
-  Finish backup-host setup first (curl … setup-backup-host.sh), then trust keys via BACKR_AUTHORIZED_KEYS pattern.
+  Finish backup-host setup first (curl … setup-backup-host.sh). With --backup-host, interactive runs offer ssh-copy-id when pubkey SSH fails; use --ssh-port / BACKR_SSH_PORT when sshd is not on 22. Otherwise use Backr → Trust keys (#/host/trust) or authorized_keys.
 
 NXT
     return 0
@@ -322,46 +395,12 @@ NXT
 
   if [[ "${SURVEY_SKIP_NO_TTY:-0}" == "1" ]]; then
     cat <<'NXT'
-• No /dev/tty — questionnaire skipped (some CI/GUI terminals). Re-run in a normal terminal for prompts.
+• No usable interactive terminal — questionnaire was skipped (some CI environments, nested terminals, or SSH without a TTY).
+
+  Open a normal terminal locally or use `ssh -t`, then run `./scripts/setup-connecting-client.sh` again for prompts and tailored hints.
 
 NXT
   fi
-
-  case "${SURVEY_CLIENT_SERVER_READY:-unknown}" in
-    no | unknown)
-      cat <<'NXT'
-• Backup server prep unclear / not done: on that machine run the hosted setup-backup-host.sh (see README §5) before expecting SSH/rsync from Backr.
-
-NXT
-      ;;
-  esac
-
-  case "${SURVEY_CLIENT_NETWORK:-unknown}" in
-    unknown)
-      cat <<'NXT'
-• Network path unclear: from this laptop run ping/traceroute to the backup IP; confirm whether you need VPN or port-forwarding for SSH.
-
-NXT
-      ;;
-    lan)
-      cat <<'NXT'
-• LAN usage: use the server's private IP (see router DHCP leases or `hostname -I` on the NAS). Off-site backups won't work until VPN or port-forward exists.
-
-NXT
-      ;;
-    internet)
-      cat <<'NXT'
-• Internet path: confirm DNS/DDNS resolves, router forwards TCP to sshd's port, and cloud SGs allow inbound SSH.
-
-NXT
-      ;;
-    vpn)
-      cat <<'NXT'
-• VPN path: connect VPN before launching Backr backups; SSH targets are usually RFC1918 addresses.
-
-NXT
-      ;;
-  esac
 
   if [[ -z "${BACKUP_SSH_TARGET:-}" ]] && [[ -z "${BACKR_BACKUP_HOST:-}" ]]; then
     case "${SURVEY_CLIENT_HOST_PLAN:-unknown}" in
@@ -614,6 +653,26 @@ ensure_nodejs() {
 }
 
 #
+# Inputs: none — uses REPO_ROOT and npm. Outputs: installs @clack/prompts under node_modules when missing (OpenClaw-style wizard).
+# External: npm install resolves packages (inputs: package.json + registry; outputs: node_modules).
+#
+ensure_clack_prompts_pkg() {
+  [[ -d "$REPO_ROOT/node_modules/@clack/prompts" ]] && return 0
+  echo "Installing @clack/prompts for the setup wizard …"
+  (cd "$REPO_ROOT" && npm install --no-audit --no-fund @clack/prompts) || return 1
+}
+
+#
+# Inputs: none. Outputs: before interactive questionnaire, ensures Node/npm and @clack/prompts when a TTY questionnaire will run.
+#
+connecting_client_prepare_interactive_wizard() {
+  [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]] && return 0
+  survey_tty_is_usable_client || return 0
+  ensure_nodejs
+  ensure_clack_prompts_pkg || true
+}
+
+#
 # Installs distro packages needed for Tauri desktop builds plus ssh/rsync/git helpers.
 #
 install_connecting_os_packages() {
@@ -692,6 +751,7 @@ install_node_project_deps() {
 }
 
 maybe_create_ssh_key() {
+  command -v ssh-keygen &>/dev/null || return 0
   local priv="$HOME/.ssh/id_ed25519"
   [[ "$SKIP_KEYGEN" -eq 1 ]] && return 0
   if [[ -f "$priv" ]]; then
@@ -700,6 +760,20 @@ maybe_create_ssh_key() {
   fi
   mkdir -p "$HOME/.ssh"
   chmod 700 "$HOME/.ssh"
+
+  if [[ "$AUTO_SSH_KEY" -eq 1 ]]; then
+    echo "Creating Ed25519 SSH key (auto): ${priv}"
+    # External: OpenSSH ssh-keygen writes keys under ~/.ssh (inputs: type, path, empty passphrase; outputs: keypair files).
+    ssh-keygen -t ed25519 -f "$priv" -N "" -C "backr-$(whoami)@$(hostname -s 2>/dev/null || echo host)"
+    echo "Created ${priv} and ${priv}.pub"
+    return 0
+  fi
+
+  if [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]]; then
+    echo "No Ed25519 key at ${priv} — skipping generation (--non-interactive). Use --auto-ssh-key or create a key before backups."
+    return 0
+  fi
+
   echo "No Ed25519 key found at ${priv}."
   read -r -p "Generate one now? [y/N] " ans || true
   if [[ "${ans:-}" =~ ^[yY]$ ]]; then
@@ -819,7 +893,6 @@ install_appimage_build_and_integrate() {
   ensure_nodejs
   ensure_rust_toolchain
   ensure_projects_dir
-  maybe_create_ssh_key
   install_node_project_deps
   echo "Building Backr AppImage (npm run tauri:build) …"
   (cd "$REPO_ROOT" && npm run tauri:build)
@@ -863,8 +936,7 @@ Run the app:
 Release build:
   npm run tauri:build
 
-Backups — trust pubkey on backup host (passwordless; no ssh-copy-id). Use **BACKR_AUTHORIZED_KEYS** on the server
-or re-run this script with **--backup-host HOST** to print the one-liner.
+Backups — default trust bootstrap when you passed **--backup-host**: if pubkey SSH isn't ready yet, the script offers **ssh-copy-id** (you type the SSH password **once** at the prompt — not stored here). **--yes-ssh-copy-id** skips the confirmation. **--ssh-port** / **BACKR_SSH_PORT** set the port when sshd is not on 22. If that isn't possible, use Backr on the backup machine → **Trust keys** (#/host/trust) or **authorized_keys**. Set **BACKR_NO_SSH_COPY_ID=1** or **--no-ssh-copy-id** to skip the offer. Re-run with **--backup-host HOST** to verify SSH after trust.
 
 Then set in ~/.config/backr/config.toml after the wizard:
   [local]
@@ -888,53 +960,111 @@ normalize_backup_ssh_target() {
 }
 
 #
-# Inputs: BACKUP_SSH_TARGET or BACKR_BACKUP_HOST when set; ~/.ssh/id_ed25519.pub must exist for bootstrap text.
-# Outputs: verifies ssh BatchMode to target; if unreachable or still denied, prints pubkey + BACKR_AUTHORIZED_KEYS server command (no ssh-copy-id).
-# External: ssh tests pubkey authentication without prompting (BatchMode); curl URL is Backr upstream raw script.
+# Inputs: BACKUP_SSH_TARGET or BACKR_BACKUP_HOST when set; BACKR_SETUP_PUBKEY_LINE or ~/.ssh/id_ed25519.pub for fallback text.
+# Outputs: verifies ssh BatchMode to target; when probe fails interactively, offers ssh-copy-id (default Y); then Trust-keys hints if still failing.
+# External: ssh BatchMode probes pubkey auth; ssh-copy-id invokes ssh (password at prompt, not read by this script).
 #
 verify_pubkey_ssh_or_print_bootstrap_line() {
   local raw="" target="" pub="$HOME/.ssh/id_ed25519.pub"
-  local ssh_opts=( -o BatchMode=yes -o ConnectTimeout=12 )
+  local batch_opts=( -o BatchMode=yes -o ConnectTimeout=12 )
   local ssh_hint="ssh -o BatchMode=yes -o ConnectTimeout=12"
   raw="${BACKUP_SSH_TARGET:-}"
   [[ -n "$raw" ]] || return 0
 
   target="$(normalize_backup_ssh_target "$raw")"
 
-  if [[ "${SURVEY_CLIENT_SSH_PORT:-}" == "custom" ]] && [[ -n "${SURVEY_CLIENT_SSH_CUSTOM_PORT:-}" ]]; then
-    ssh_opts=( -p "${SURVEY_CLIENT_SSH_CUSTOM_PORT}" -o BatchMode=yes -o ConnectTimeout=12 )
-    ssh_hint="ssh -p ${SURVEY_CLIENT_SSH_CUSTOM_PORT} -o BatchMode=yes -o ConnectTimeout=12"
+  local ssh_port_use=""
+  if [[ -n "${CLI_SSH_PORT:-}" ]]; then
+    if [[ "${CLI_SSH_PORT}" =~ ^[0-9]+$ ]] && [[ "${CLI_SSH_PORT}" -ge 1 ]] && [[ "${CLI_SSH_PORT}" -le 65535 ]]; then
+      ssh_port_use="$CLI_SSH_PORT"
+    else
+      echo "warning: ignoring invalid --ssh-port / BACKR_SSH_PORT: ${CLI_SSH_PORT}" >&2
+    fi
+  fi
+  if [[ -z "$ssh_port_use" ]] && [[ "${SURVEY_CLIENT_SSH_PORT:-}" == "custom" ]] && [[ -n "${SURVEY_CLIENT_SSH_CUSTOM_PORT:-}" ]]; then
+    ssh_port_use="${SURVEY_CLIENT_SSH_CUSTOM_PORT}"
+  fi
+  if [[ -n "$ssh_port_use" ]]; then
+    batch_opts=( -p "${ssh_port_use}" -o BatchMode=yes -o ConnectTimeout=12 )
+    ssh_hint="ssh -p ${ssh_port_use} -o BatchMode=yes -o ConnectTimeout=12"
   fi
 
   [[ -f "$pub" ]] || {
     echo "Note: missing ${pub} — generate a key before using passwordless SSH to ${target}."
-    return 0
   }
 
-  if ssh "${ssh_opts[@]}" "$target" "exit 0" 2>/dev/null; then
+  if ssh "${batch_opts[@]}" "$target" "exit 0" 2>/dev/null; then
     echo "SSH pubkey authentication OK for ${target} (BatchMode probe)."
     return 0
   fi
 
-  local key_line=""
-  key_line="$(head -n1 "$pub" | tr -d '\r')"
-  [[ -n "$key_line" ]] || return 0
+  # Default interactive path: ssh-copy-id (password is typed at OpenSSH's prompt, never stored in this script).
+  if [[ "${BACKR_NON_INTERACTIVE:-0}" != "1" ]] &&
+    [[ "${SKIP_SSH_COPY_ID:-0}" -eq 0 ]] &&
+    survey_tty_is_usable_client &&
+    [[ -f "$pub" ]] &&
+    command -v ssh-copy-id &>/dev/null; then
+    echo ""
+    echo "── Trust bootstrap (default) ──"
+    echo "ssh-copy-id will append ${pub} to ${target}'s authorized_keys."
+    echo "OpenSSH will ask for your SSH password once — it is not passed on this script's command line."
+    local ans=""
+    if [[ "${YES_SSH_COPY_ID:-0}" -eq 1 ]]; then
+      ans="y"
+    else
+      read -r -p "Run ssh-copy-id now? [Y/n] " ans </dev/tty 2>/dev/null || ans=""
+    fi
+    if [[ ! "${ans,,}" =~ ^(n|no)$ ]]; then
+      local copy_args=( -i "$pub" -o StrictHostKeyChecking=accept-new )
+      if [[ -n "$ssh_port_use" ]]; then
+        copy_args+=( -p "${ssh_port_use}" )
+      fi
+      # External: ssh-copy-id runs ssh non-BatchMode so the operator can authenticate with a password once when permitted.
+      if ssh-copy-id "${copy_args[@]}" "$target"; then
+        if ssh "${batch_opts[@]}" "$target" "exit 0" 2>/dev/null; then
+          echo "SSH pubkey authentication OK for ${target} after ssh-copy-id."
+          return 0
+        fi
+        echo "ssh-copy-id reported success but BatchMode SSH still fails — try Trust keys or authorized_keys below." >&2
+      else
+        echo "ssh-copy-id did not succeed (wrong password, pubkey-only account, or server policy) — use Trust keys or manual authorized_keys below." >&2
+      fi
+    fi
+  elif [[ "${SKIP_SSH_COPY_ID:-0}" -eq 1 ]] || [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]]; then
+    :
+  elif [[ ! -f "$pub" ]]; then
+    :
+  elif ! command -v ssh-copy-id &>/dev/null; then
+    echo "Note: ssh-copy-id not found — install openssh-client or use Trust keys / authorized_keys below." >&2
+  fi
 
-  local raw_url="https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh"
+  local key_line=""
+  key_line="$(printf '%s' "${BACKR_SETUP_PUBKEY_LINE:-}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ -z "$key_line" ]] && [[ -f "$pub" ]]; then
+    key_line="$(head -n1 "$pub" | tr -d '\r')"
+  fi
+  [[ -n "$key_line" ]] || {
+    cat <<EOF
+
+── Passwordless SSH not working yet for ${target} ──
+Add your laptop's pubkey for user $(printf '%s' "$target" | cut -d@ -f1) on the backup machine: Backr sidebar «Trust keys» (hash #/host/trust), or edit ~/.ssh/authorized_keys there.
+
+Then retry:
+
+  ${ssh_hint} ${target} exit
+
+EOF
+    return 0
+  }
 
   cat <<EOF
 
 ── Passwordless SSH not working yet for ${target} ──
-This script does not use ssh-copy-id or SSH passwords. On the **backup machine** (console or existing admin SSH),
-install your laptop pubkey for user $(printf '%s' "$target" | cut -d@ -f1) — paste exactly one line:
+Install your laptop pubkey for user $(printf '%s' "$target" | cut -d@ -f1): paste one line into Backr → Trust keys (#/host/trust), or append to that user's ~/.ssh/authorized_keys:
 
 ${key_line}
 
-One-shot (from backup host as root), quoting preserved:
-
-  sudo BACKR_AUTHORIZED_KEYS=$(printf '%q' "${key_line}") bash -c 'curl -fsSL ${raw_url} | bash'
-
-Then re-run connectivity from here:
+Then retry from here:
 
   ${ssh_hint} ${target} exit
 
@@ -943,8 +1073,23 @@ EOF
 
 main() {
   parse_args "$@"
-  run_connecting_client_questionnaire
   require_linux
+
+  if [[ -z "${CLI_SSH_PORT:-}" ]] && [[ -n "${BACKR_SSH_PORT:-}" ]]; then
+    CLI_SSH_PORT="$BACKR_SSH_PORT"
+  fi
+  if [[ -n "${CLI_SSH_PORT:-}" ]]; then
+    [[ "${CLI_SSH_PORT}" =~ ^[0-9]+$ ]] || die "--ssh-port / BACKR_SSH_PORT must be digits only, got: ${CLI_SSH_PORT}"
+    [[ "${CLI_SSH_PORT}" -ge 1 && "${CLI_SSH_PORT}" -le 65535 ]] || die "--ssh-port / BACKR_SSH_PORT out of range: ${CLI_SSH_PORT}"
+  fi
+
+  connecting_client_prepare_interactive_wizard
+
+  if [[ "$AUTO_SSH_KEY" -eq 1 ]] || [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]] || survey_tty_is_usable_client; then
+    maybe_create_ssh_key
+  fi
+
+  run_connecting_client_questionnaire
 
   if [[ -z "$BACKUP_SSH_TARGET" ]] && [[ -n "${BACKR_BACKUP_HOST:-}" ]]; then
     BACKUP_SSH_TARGET="$BACKR_BACKUP_HOST"
@@ -965,7 +1110,6 @@ main() {
       ensure_nodejs
       ensure_rust_toolchain
       ensure_projects_dir
-      maybe_create_ssh_key
       install_node_project_deps
       print_done
       ;;

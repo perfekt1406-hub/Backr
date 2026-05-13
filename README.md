@@ -30,9 +30,9 @@ Before you build or run Backr, install:
 | **System libraries for Tauri** | Follow the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS (on Linux this typically includes WebKitGTK and related packages). |
 | **`ssh` and `rsync`** | Used at runtime for backups and remote listing; required on the machine running Backr. |
 
-On **Linux**, `./scripts/setup-connecting-client.sh` (default) installs the toolchain above, **`npm ci` / `npm install`**, runs **`npm run tauri:build`**, and installs the built **AppImage** plus a launcher entry under **`~/.local/share/`**. Pass **`--backup-host`** *hostname-or-IP* (or **`BACKR_BACKUP_HOST`**) so the script checks pubkey **`ssh`** (BatchMode; **no** passwords / **no** `ssh-copy-id`) and prints a **`BACKR_AUTHORIZED_KEYS`** one-liner if trust is still missing. Use **`--deps-only`** for toolchain + npm only (no build; for **`npm run tauri:dev`**).
+On **Linux**, `./scripts/setup-connecting-client.sh` (default) installs the toolchain above, **`npm ci` / `npm install`**, runs **`npm run tauri:build`**, and installs the built **AppImage** plus a launcher entry under **`~/.local/share/`**. Pass **`--backup-host`** *hostname-or-IP* (or **`BACKR_BACKUP_HOST`**) so the script probes pubkey **`ssh`** (BatchMode first). **Interactively**, if that fails it **offers `ssh-copy-id` by default** (you type the SSH password **once** at OpenSSH’s prompt — not stored in the script). Use **`--no-ssh-copy-id`** or **`BACKR_NO_SSH_COPY_ID=1`** to skip that and rely on **Trust keys** / **`authorized_keys`** hints only. **`--non-interactive`** skips the questionnaire and the **`ssh-copy-id`** prompt; export **`BACKR_SETUP_PUBKEY_LINE`** if you want pubkey text in the printed hints. Use **`--deps-only`** for toolchain + npm only (no build; for **`npm run tauri:dev`**).
 
-The remote backup host must provide **`rsync`** and SSH access; **`setup-backup-host.sh`** merges **`BACKR_AUTHORIZED_KEYS`** / **`--pubkey`**, turns **`PubkeyAuthentication`** on, and applies **`Match User`** rules so the **`backr`** account is **pubkey-only** once **`authorized_keys`** has at least one key line (no SSH password for that account after that).
+The remote backup host must provide **`rsync`** and SSH access; **`setup-backup-host.sh`** prepares **`sshd`**, the **`backr`** account, and **`authorized_keys`** scaffolding. **Before `backr` is pubkey-only**, you can install trust with **`ssh-copy-id`** from the laptop or by **pasting** into the Backr host app (**Trust keys** / **`#/host/trust`**) or editing **`authorized_keys`**. Once **`authorized_keys`** has at least one key line for **`backr`**, **`Match User`** rules make that account **pubkey-only** (no SSH password for that account after that).
 
 ---
 
@@ -42,13 +42,13 @@ The remote backup host must provide **`rsync`** and SSH access; **`setup-backup-
 
 1. **On the backup machine (once, as root):**  
    `curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash`  
-   To inject your laptop’s pubkey in the same step (no `ssh-copy-id` later), set **`BACKR_AUTHORIZED_KEYS`** as in [§5](#5-optional-linux-backup-host-script-nas--server).
+   Then **trust this laptop’s SSH key** from the Backr window on that machine: sidebar **Trust keys** (**`#/host/trust`**) and paste one line from **`~/.ssh/id_ed25519.pub`** here — or append that line to **`backr`’s `authorized_keys`** over SSH/console.
 2. **On your laptop:** clone the repo, then  
    `./scripts/setup-connecting-client.sh --backup-host BACKUP_IP_OR_DNS`  
-   If pubkey login is not ready yet, the script prints your pubkey and the **`BACKR_AUTHORIZED_KEYS`** command — still **no** `ssh-copy-id` or SSH passwords in our scripts.
+   Interactive setup asks **two things**: SSH port and (if you didn’t pass `--backup-host`) an optional backup host. After setup, if pubkey SSH still fails, it offers **`ssh-copy-id`** by default; **Trust keys** stays the fallback when passwords aren’t allowed.
 3. **Launch Backr** from the app menu and finish the in-app setup wizard.
 
-Both scripts start an optional **multiple-choice questionnaire** when **`/dev/tty`** is available (arrow-key **`dialog`** / **`whiptail`** menus when possible — they **`apt`/`dnf`/… install `dialog`** if needed; the laptop script uses **`sudo`** for that step). Answers **`4`** = *I don't know*. At the end you get **tailored «what to do next»** text derived from those answers plus auto-detection. Piped installs (no TTY) or **`BACKR_NON_INTERACTIVE=1`** / **`--non-interactive`** skip prompts and print shorter defaults instead.
+Both scripts ask a **short questionnaire** when there is a **usable interactive terminal**. **Laptop** uses **`@clack/prompts`** when Node is available; otherwise **`dialog`** / typed prompts — **two questions** (SSH port + optional backup host unless **`--backup-host`** is already set). **Backup host** stays **bash + `dialog`** (**two questions**: how clients reach SSH, how pubkeys get into **`authorized_keys`**). **`curl … | sudo bash`** works best with a real TTY (use **`ssh -t`** if prompts disappear). **`BACKR_NON_INTERACTIVE=1`** / **`--non-interactive`** or no TTY skips prompts.
 
 ### 1. Clone
 
@@ -59,7 +59,7 @@ cd Backr
 
 ### 2. Install Backr on your laptop (inside the repo)
 
-**Linux (recommended):** one command installs Tauri deps, Node.js, Rust, **`npm ci` / `npm install`**, **`npm run tauri:build`**, and registers the **AppImage** in your app menu. Pass your backup server address so the script verifies pubkey **`ssh`** (defaults SSH user **`backr`** when you pass only a hostname or IP) and prints bootstrap commands if needed (**still no** `ssh-copy-id`):
+**Linux (recommended):** one command installs Tauri deps, Node.js, Rust, **`npm ci` / `npm install`**, **`npm run tauri:build`**, and registers the **AppImage** in your app menu. Pass your backup server address so the script verifies pubkey **`ssh`** (defaults SSH user **`backr`** when you pass only a hostname or IP). **Interactively**, if trust is missing it offers **`ssh-copy-id`** first (password typed at the prompt); otherwise follow **Trust keys** (**`#/host/trust`**) printed hints (**`--no-ssh-copy-id`** to skip):
 
 ```bash
 ./scripts/setup-connecting-client.sh --backup-host 192.168.1.50
@@ -111,7 +111,7 @@ Installable bundles are produced under `src-tauri/target/release/bundle/` accord
 
 ### 5. Optional: Linux backup host script (NAS / server)
 
-The backup helper detects **apt**, **dnf**, **yum**, **pacman**, **zypper**, **apk** and expects **sudo**. It installs **OpenSSH server** + **rsync**, validates **`sshd`**, ensures **`/etc/ssh/sshd_config.d/`** drop-ins apply, writes **`PubkeyAuthentication yes`**, creates **`backr`** + **`/srv/backr`**, merges optional pubkeys (**`BACKR_AUTHORIZED_KEYS`**, **`--pubkey`**, **`--pubkey-file`**). After **`authorized_keys`** contains at least one pubkey line for **`backr`**, it adds **`Match User`** rules so that account is **pubkey-only** (no SSH password / keyboard-interactive for **`backr`**). It fixes **SELinux** contexts when enforcing, opens **SSH** on **UFW** / **firewalld** only when those stacks are already active (never enables a firewall by surprise — use **`--no-firewall`** to skip), writes **`/etc/backr/host.toml`**, prints an **auto-detected** summary (**`/etc/os-release`**, firewall managers, **`sshd -T`** ports/auth toggles, **`ss`** listeners), and starts an optional **questionnaire** when **`/dev/tty`** exists (choice **4** = *I don't know*) followed by **tailored next-step instructions** (**--non-interactive** or unattended stdin pipes skip prompts).
+The backup helper detects **apt**, **dnf**, **yum**, **pacman**, **zypper**, **apk** and expects **sudo**. It installs **OpenSSH server** + **rsync**, validates **`sshd`**, ensures **`/etc/ssh/sshd_config.d/`** drop-ins apply, writes **`PubkeyAuthentication yes`**, creates **`backr`** + **`/srv/backr`**, and prepares **`~backr/.ssh/authorized_keys`** (operators add keys afterward via Backr **Trust keys** / **`#/host/trust`** or by editing **`authorized_keys`**). After **`authorized_keys`** contains at least one pubkey line for **`backr`**, it adds **`Match User`** rules so that account is **pubkey-only** (no SSH password / keyboard-interactive for **`backr`**). It fixes **SELinux** contexts when enforcing, opens **SSH** on **UFW** / **firewalld** only when those stacks are already active (never enables a firewall by surprise — use **`--no-firewall`** to skip), writes **`/etc/backr/host.toml`**, prints an **auto-detected** summary (**`/etc/os-release`**, firewall managers, **`sshd -T`** ports/auth toggles, **`ss`** listeners), and starts an optional **questionnaire** when **`/dev/tty`** exists (choice **4** = *I'll set it up myself*) followed by **tailored next-step instructions** (**--non-interactive** or unattended stdin pipes skip prompts).
 
 **Typical one-liner on the backup machine** (no repo clone):
 
@@ -119,11 +119,7 @@ The backup helper detects **apt**, **dnf**, **yum**, **pacman**, **zypper**, **a
 curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash
 ```
 
-**Trust your laptop key without running `ssh-copy-id` later** (run on the backup host; paste your pubkey line):
-
-```bash
-sudo BACKR_AUTHORIZED_KEYS="ssh-ed25519 AAAA… comment" bash -c 'curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | bash'
-```
+**Trust your laptop key** — while **`backr`** still allows password SSH, run **`ssh-copy-id`** from the laptop (from **`setup-connecting-client.sh`** with **`--backup-host`**, or manually); **or** open **Trust keys** (**`#/host/trust`**) on the backup host and paste one line from **`~/.ssh/id_ed25519.pub`** — or append that line to **`backr`’s `authorized_keys`**.
 
 Repo checkout equivalent:
 
@@ -170,7 +166,7 @@ Per-project snapshot counts and “last backup” labels on the **dashboard** ar
 |------|------|
 | `src/` | Svelte 5 UI, routes, stores, and TypeScript command wrappers. |
 | `src-tauri/` | Rust crate: config, scheduler, tray, rsync/SSH backup, Tauri commands. |
-| `scripts/` | `setup-backup-host.sh` & `setup-connecting-client.sh`: bootstrap + optional **questionnaires** (choice **4** = *I don't know*) → **tailored next steps**; **`--non-interactive`** skips prompts (pipes/CI); **no** `ssh-copy-id`. |
+| `scripts/` | `setup-backup-host.sh` & `setup-connecting-client.sh`: bootstrap + optional **questionnaires** → **tailored next steps**; laptop script offers **`ssh-copy-id`** by default when **`--backup-host`** probe fails (unless **`--no-ssh-copy-id`**); Trust keys **`#/host/trust`** as fallback; **`--non-interactive`** skips prompts (pipes/CI). |
 
 UI design notes can live in `brand-aesthetic.md` locally (that filename is gitignored). A deeper technical plan and remote snapshot layout are documented in [tauri-app-then-can-breezy-peacock.md](tauri-app-then-can-breezy-peacock.md).
 

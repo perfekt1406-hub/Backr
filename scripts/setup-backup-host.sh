@@ -1,35 +1,34 @@
 #!/usr/bin/env bash
 #
 # Purpose: Turn a generic Linux machine into a Backr backup target with minimal operator effort — packages, sshd,
-#          firewall rules when a manager is already active, authorized_keys, backup tree, host-dashboard marker, optional
-#          interactive questionnaire + tailored next-steps for facts scripts cannot infer (router/VPN/NAS uncertainty).
+#          firewall rules when a manager is already active, authorized_keys scaffold, backup tree, host-dashboard marker,
+#          optional interactive questionnaire + tailored next-steps for facts scripts cannot infer (router/VPN/NAS uncertainty).
 # Role: Distro-aware install of OpenSSH server + rsync; validates sshd_config; ensures drop-in snippets load;
-#       optional pubkey ingestion (--pubkey, --pubkey-file, BACKR_AUTHORIZED_KEYS); Match blocks disable SSH passwords for
-#       BACKR_USER only once authorized_keys holds keys; UFW/firewalld SSH allowance when already enforcing; SELinux
+#       Pubkeys normally via Backr Trust (`#/host/trust`), SSH, or console; optional BACKR_TRUST_PUBKEY / --trust-pubkey-file appends automatically. Match blocks disable SSH passwords for
+#       BACKR_USER once authorized_keys holds keys; UFW/firewalld SSH allowance when already enforcing; SELinux
 #       ~/.ssh contexts when enforcing; prints auto-detected OS/firewall/sshd facts (sshd -T, ss listeners);
 #       optional questionnaire installs dialog when needed for arrow-key menus + tailored next-steps.
 #
 # Typical usage (on the backup machine, one command):
 #   curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash
 #
-# Passwordless trust for your laptop’s pubkey (no ssh-copy-id; **backr** becomes pubkey-only after keys are installed):
-#   sudo BACKR_AUTHORIZED_KEYS="$(cat /path/to/id_ed25519.pub)" bash -c 'curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | bash'
+# Trust laptops by pasting each client's ~/.ssh/id_ed25519.pub into Backr → Trust keys (`#/host/trust`) or into ~BACKR_USER/.ssh/authorized_keys over SSH.
 #
 # Run with sudo on the machine that will receive rsync over SSH. Non-Linux hosts are not supported here.
 #
 # CLI options:
 #   --user NAME          Dedicated account (default: backr).
 #   --root PATH          Absolute backup root on disk (default: /srv/backr).
-#   --pubkey LINE        SSH public key line (repeatable). Example: --pubkey "ssh-ed25519 AAAA... comment"
-#   --pubkey-file PATH   Read key lines from file (repeatable).
 #   --no-firewall        Do not add SSH allowances to UFW or firewalld even when active.
 #   --non-interactive    Skip the questionnaire and abbreviated default next-steps (for pipes / CI).
+#   --trust-pubkey-file PATH  Append OpenSSH pubkey lines from this file to BACKR_USER's authorized_keys when missing (pairing without manual paste).
 #   --dry-run            Print actions only.
 #   -h, --help           Show this text.
 #
 # Environment:
-#   BACKR_AUTHORIZED_KEYS     Newline-separated pubkey lines to append (use with sudo -E when preserving env).
 #   BACKR_NON_INTERACTIVE=1 Same as --non-interactive.
+#   BACKR_TRUST_PUBKEY      One-line OpenSSH public key to append if not already present (same effect as a single-line file).
+#   BACKR_TRUST_PUBKEY_FILE Same as --trust-pubkey-file when the CLI flag is not passed.
 
 set -euo pipefail
 
@@ -37,9 +36,8 @@ BACKR_USER="${BACKR_USER:-backr}"
 BACKR_ROOT="${BACKR_ROOT:-/srv/backr}"
 DRY_RUN=0
 SKIP_FIREWALL=0
-# Populated by repeated --pubkey / --pubkey-file (inputs: CLI strings / paths; outputs: aggregated lines).
-declare -a BACKR_CLI_PUBKEY_LINES=()
-declare -a BACKR_CLI_PUBKEY_FILES=()
+# Optional pubkey bootstrap (see append_trust_pubkeys_from_cli_or_env).
+TRUST_PUBKEY_FILE_CLI=""
 # Questionnaire / non-interactive (see run_backup_host_questionnaire / emit_backup_host_custom_next_steps).
 BACKR_NON_INTERACTIVE="${BACKR_NON_INTERACTIVE:-0}"
 SURVEY_SKIP_NO_TTY=0
@@ -56,7 +54,7 @@ die() {
 }
 
 usage() {
-  sed -n '1,32p' "$0" | tail -n +2
+  sed -n '2,31p' "$0"
 }
 
 parse_args() {
@@ -72,16 +70,6 @@ parse_args() {
         [[ -n "$BACKR_ROOT" ]] || die "--root needs a value"
         shift 2
         ;;
-      --pubkey)
-        [[ -n "${2:-}" ]] || die "--pubkey needs a value"
-        BACKR_CLI_PUBKEY_LINES+=("$2")
-        shift 2
-        ;;
-      --pubkey-file)
-        [[ -n "${2:-}" ]] || die "--pubkey-file needs a path"
-        BACKR_CLI_PUBKEY_FILES+=("$2")
-        shift 2
-        ;;
       --no-firewall)
         SKIP_FIREWALL=1
         shift
@@ -93,6 +81,11 @@ parse_args() {
       --dry-run)
         DRY_RUN=1
         shift
+        ;;
+      --trust-pubkey-file)
+        TRUST_PUBKEY_FILE_CLI="${2:-}"
+        [[ -n "$TRUST_PUBKEY_FILE_CLI" ]] || die "--trust-pubkey-file needs a path"
+        shift 2
         ;;
       -h | --help)
         usage
@@ -106,10 +99,23 @@ parse_args() {
 }
 
 #
-# Prints lines to the controlling terminal when available (stdin may be a pipe for curl | bash).
+# Inputs: message lines as arguments. Outputs: writes each line to /dev/tty, or stderr if /dev/tty is not writable.
+# External: printf writes text (inputs: format + args; outputs: bytes to redirected fd).
 #
 survey_print_tty() {
-  printf '%s\n' "$@" >/dev/tty
+  local line
+  for line in "$@"; do
+    printf '%s\n' "$line" >/dev/tty 2>/dev/null || printf '%s\n' "$line" >&2
+  done
+}
+
+#
+# Inputs: none. Outputs: returns 0 when this process can open /dev/tty read-write (usable questionnaire session).
+# Notes: [[ -c /dev/tty ]] matches character devices that are still unusable on headless/cloud contexts — probe open instead.
+#
+survey_tty_is_usable() {
+  ( exec 3<>/dev/tty ) 2>/dev/null || return 1
+  return 0
 }
 
 #
@@ -121,6 +127,7 @@ ensure_survey_tui_pkg_host() {
   command -v whiptail &>/dev/null && return 0
   local backend
   backend="$(detect_pkg_backend)"
+  printf '%s\n' "Backr: installing «dialog» for interactive setup prompts (backend: ${backend})…" >&2
   export DEBIAN_FRONTEND=noninteractive
   case "$backend" in
     apt)
@@ -152,16 +159,18 @@ ensure_survey_tui_pkg_host() {
 }
 
 #
-# Inputs: $1 question text, $2–$4 three option strings (fourth is always «I don't know»).
+# Inputs: $1 question text, $2–$4 three option strings (fourth is always «I'll set it up myself»).
 # Outputs: emits choice 1–4 on stdout (defaults to 4 when cancelled/invalid); prefers dialog then whiptail on /dev/tty.
 #
 survey_read_menu_4() {
   local title="$1" o1="$2" o2="$3" o3="$4"
   local line="" choice="" mh=22 mw=78 ih=10
 
+  export TERM="${TERM:-xterm-256color}"
+
   if command -v dialog &>/dev/null; then
     choice="$(dialog --stdout --clear --title "Backr setup" --menu "$title" "$mh" "$mw" "$ih" \
-      1 "$o1" 2 "$o2" 3 "$o3" 4 "I don't know" \
+      1 "$o1" 2 "$o2" 3 "$o3" 4 "I'll set it up myself" \
       </dev/tty 2>/dev/tty)" || choice=""
     choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
     [[ "$choice" =~ ^[1-4]$ ]] || choice=4
@@ -172,7 +181,7 @@ survey_read_menu_4() {
   if command -v whiptail &>/dev/null; then
     export TERM="${TERM:-xterm-256color}"
     choice="$(whiptail --title "Backr setup" --menu "$title" "$mh" "$mw" "$ih" \
-      "1" "$o1" "2" "$o2" "3" "$o3" "4" "I don't know" \
+      "1" "$o1" "2" "$o2" "3" "$o3" "4" "I'll set it up myself" \
       3>&1 1>&2 2>&3 </dev/tty)" || choice=""
     choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
     [[ "$choice" =~ ^[1-4]$ ]] || choice=4
@@ -185,7 +194,7 @@ survey_read_menu_4() {
   survey_print_tty "  1) $o1"
   survey_print_tty "  2) $o2"
   survey_print_tty "  3) $o3"
-  survey_print_tty "  4) I don't know"
+  survey_print_tty "  4) I'll set it up myself"
   survey_print_tty "Choice [1-4]:"
   read -r line </dev/tty 2>/dev/null || line=""
   line="$(printf '%s' "$line" | tr -d '[:space:]')"
@@ -194,78 +203,50 @@ survey_read_menu_4() {
 }
 
 #
-# Runs an interactive questionnaire when /dev/tty exists and BACKR_NON_INTERACTIVE is unset.
+# Runs an interactive questionnaire when a usable controlling tty exists and BACKR_NON_INTERACTIVE is unset.
 # Outputs: fills SURVEY_* globals used by emit_backup_host_custom_next_steps.
 #
 run_backup_host_questionnaire() {
   [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]] && return 0
   [[ "$DRY_RUN" -eq 1 ]] && return 0
-  [[ -c /dev/tty ]] || {
+  if ! survey_tty_is_usable; then
     SURVEY_SKIP_NO_TTY=1
     return 0
-  }
+  fi
+
+  # curl … | sudo bash leaves stdin on a pipe — attach stdin to the real terminal so menus and reads behave consistently.
+  if [[ ! -t 0 ]]; then
+    exec </dev/tty 2>/dev/null || true
+  fi
+
+  export TERM="${TERM:-xterm-256color}"
 
   local c=""
   survey_print_tty ""
-  survey_print_tty "=== Backr backup host — quick questionnaire ==="
-  survey_print_tty "Choose the best match; option 4 means «I don't know» — you'll get discovery steps at the end."
+  survey_print_tty "=== Backr backup host — 2 quick questions ==="
+  survey_print_tty "Terms: SSH \"public key\" = one line from the laptop's ~/.ssh/id_ed25519.pub (safe to share). \"Trust keys\" = Backr app screen (#/host/trust) to paste it. authorized_keys = server file listing allowed keys for login."
+  survey_print_tty "Option 4 is «I'll figure it out» — shorter hints at the end."
   survey_print_tty ""
-  ensure_survey_tui_pkg_host 2>/dev/null || true
+  ensure_survey_tui_pkg_host || survey_print_tty "(Could not install «dialog» — using simple typed 1–4 prompts instead.)"
+
+  SURVEY_DEPLOYMENT=unknown
+  SURVEY_SSH_PORT=unknown
+  SURVEY_SSH_CUSTOM_PORT=""
+  SURVEY_PLATFORM=unknown
 
   c="$(survey_read_menu_4 \
-    "Where does this machine mainly run?" \
-    "Home or office LAN" \
-    "VPS or cloud VM" \
-    "Other / mixed")"
-  case "$c" in 1) SURVEY_DEPLOYMENT=lan ;; 2) SURVEY_DEPLOYMENT=cloud ;; 3) SURVEY_DEPLOYMENT=other ;; *) SURVEY_DEPLOYMENT=unknown ;; esac
-
-  c="$(survey_read_menu_4 \
-    "How will backup clients reach SSH on this box?" \
+    "How will backup laptops reach SSH on this machine?" \
     "Same LAN only (private IPs)" \
     "Over the internet (public IP, DDNS, port forward)" \
     "VPN to this network first")"
   case "$c" in 1) SURVEY_REACH=lan_only ;; 2) SURVEY_REACH=internet ;; 3) SURVEY_REACH=vpn ;; *) SURVEY_REACH=unknown ;; esac
 
   c="$(survey_read_menu_4 \
-    "Which SSH port does sshd use here?" \
-    "Default 22" \
-    "A different port (you'll type it next)" \
-    "I'll verify using «Auto-detected» sshd Port lines after setup")"
-  case "$c" in
-    1)
-      SURVEY_SSH_PORT=default
-      SURVEY_SSH_CUSTOM_PORT=""
-      ;;
-    2)
-      SURVEY_SSH_PORT=custom
-      survey_print_tty "Enter TCP port number for sshd (e.g. 2222):"
-      read -r SURVEY_SSH_CUSTOM_PORT </dev/tty 2>/dev/null || SURVEY_SSH_CUSTOM_PORT=""
-      SURVEY_SSH_CUSTOM_PORT="${SURVEY_SSH_CUSTOM_PORT//[^0-9]/}"
-      [[ -z "$SURVEY_SSH_CUSTOM_PORT" ]] && SURVEY_SSH_PORT=unknown
-      ;;
-    3 | 4)
-      SURVEY_SSH_PORT=unknown
-      SURVEY_SSH_CUSTOM_PORT=""
-      ;;
-    *)
-      SURVEY_SSH_PORT=unknown
-      SURVEY_SSH_CUSTOM_PORT=""
-      ;;
-  esac
-
-  c="$(survey_read_menu_4 \
-    "What best describes this OS?" \
-    "Normal Linux server (apt/dnf/pacman-style packages)" \
-    "NAS / appliance UI (Synology, QNAP, … or unclear Linux)" \
-    "Unsure — I'll rely on script output / docs")"
-  case "$c" in 1) SURVEY_PLATFORM=generic_linux ;; 2) SURVEY_PLATFORM=nas ;; *) SURVEY_PLATFORM=unknown ;; esac
-
-  c="$(survey_read_menu_4 \
-    "How will your laptop's SSH public key get into ${BACKR_USER}'s authorized_keys?" \
-    "BACKR_AUTHORIZED_KEYS / --pubkey while running this script" \
-    "I'll paste it later from a console or existing admin SSH session" \
-    "Someone else administers this server")"
-  case "$c" in 1) SURVEY_KEYPATH=inline ;; 2) SURVEY_KEYPATH=console_later ;; 3) SURVEY_KEYPATH=other_admin ;; *) SURVEY_KEYPATH=unknown ;; esac
+    "How will each laptop's public key get into ${BACKR_USER}'s authorized_keys?" \
+    "Backr on this machine → Trust keys (#/host/trust)" \
+    "SSH or console — edit ~/.ssh/authorized_keys manually" \
+    "Someone else administers SSH here")"
+  case "$c" in 1) SURVEY_KEYPATH=backr_trust_ui ;; 2) SURVEY_KEYPATH=console_later ;; 3) SURVEY_KEYPATH=other_admin ;; *) SURVEY_KEYPATH=unknown ;; esac
 
   survey_print_tty ""
   survey_print_tty "Thanks — continuing setup…"
@@ -291,7 +272,7 @@ emit_backup_host_custom_next_steps() {
 You used --non-interactive / BACKR_NON_INTERACTIVE — questionnaire was skipped.
 
   • If this was curl | sudo bash: run again from an interactive shell without --non-interactive if you want tailored hints.
-  • Trust path (passwordless **backr**): supply BACKR_AUTHORIZED_KEYS or --pubkey on this host, or merge keys from console.
+  • Trust path (passwordless **backr**): paste laptop pubkeys via Backr → Trust keys (`#/host/trust`), edit ~BACKR_USER/.ssh/authorized_keys over SSH, or re-run with **--trust-pubkey-file** / **BACKR_TRUST_PUBKEY** to append automatically.
   • Clients must reach the sshd Port shown in «Auto-detected» above (same for LAN router/VPN/firewall rules).
 
 NXT
@@ -300,19 +281,10 @@ NXT
 
   if [[ "${SURVEY_SKIP_NO_TTY:-0}" == "1" ]]; then
     cat <<'NXT'
-No controlling terminal (/dev/tty) — questionnaire was skipped (common with piped installs).
+No usable interactive terminal — questionnaire was skipped (common with SSH without a TTY, serial/IPMI consoles, Docker without `-it`, or some cloud agents).
 
-  • Re-run interactively from ssh/console: sudo bash scripts/setup-backup-host.sh
-  • Or set BACKR_NON_INTERACTIVE=1 explicitly when automation must stay silent.
-
-NXT
-  fi
-
-  if [[ "$SURVEY_DEPLOYMENT" == "unknown" ]]; then
-    cat <<'NXT'
-• You weren't sure where this machine «lives». Discover it:
-    hostname -f ; hostname -I ; ip -br addr
-  Decide whether backups will use a private LAN IP, a VPN address, or a public hostname — then use that same address from the laptop.
+  • Prefer an ordinary login shell: `ssh -t user@HOST`, then `curl … | sudo bash` from there — or clone the repo and run `sudo bash scripts/setup-backup-host.sh`.
+  • Add `--non-interactive` when you intentionally want zero prompts on headless installs.
 
 NXT
   fi
@@ -348,45 +320,26 @@ NXT
       ;;
   esac
 
-  if [[ "$SURVEY_SSH_PORT" == "unknown" ]]; then
-    printf '%s\n' "• SSH port unclear — effective listen ports from sshd: ${eff_ports:-run «sshd -T | grep -i port» as root}"
-    cat <<'NXT'
-  From a client, try:  ssh -v -o ConnectTimeout=5 USER@HOST -p 22  then retry with other -p values if needed.
-
-NXT
-  fi
-
-  if [[ "$SURVEY_SSH_PORT" == "custom" ]] && [[ -n "$SURVEY_SSH_CUSTOM_PORT" ]]; then
-    printf '%s\n' "• You said SSH uses port ${SURVEY_SSH_CUSTOM_PORT}. Effective sshd ports here: ${eff_ports:-unknown}"
-    cat <<'NXT'
-  If they differ, edit /etc/ssh/sshd_config (or drop-ins), then systemctl reload sshd — or adjust your answer next run.
-
-NXT
-  fi
-
-  case "$SURVEY_PLATFORM" in
-    nas | unknown)
-      cat <<'NXT'
-• NAS / unknown OS: if this script's packages failed or sshd behaves oddly, check vendor docs for «SSH server» + rsync; you may need their package UI instead of apt/dnf.
-
-NXT
-      ;;
-  esac
+  printf '%s\n' "• Effective sshd TCP ports here: ${eff_ports:-unknown} (full detail in «Auto-detected» above)."
 
   case "$SURVEY_KEYPATH" in
-    inline)
-      if [[ -z "${BACKR_AUTHORIZED_KEYS:-}" ]] && [[ "${#BACKR_CLI_PUBKEY_LINES[@]}" -eq 0 ]] && [[ "${#BACKR_CLI_PUBKEY_FILES[@]}" -eq 0 ]]; then
-        cat <<'NXT'
-• You chose «inline keys» but didn't pass BACKR_AUTHORIZED_KEYS / --pubkey / --pubkey-file. Re-run with one of those, or paste your laptop pubkey into authorized_keys manually.
-
-NXT
-      fi
-      ;;
-    console_later | other_admin | unknown)
+    backr_trust_ui)
       cat <<'NXT'
-• Pubkey install still manual on this host: append one line from the laptop's ~/.ssh/id_ed25519.pub to ~BACKR_USER/.ssh/authorized_keys (see README BACKR_AUTHORIZED_KEYS curl pattern).
+• Use this machine’s Backr window → sidebar «Trust keys» (URL hash #/host/trust). Paste one full line from the laptop’s ~/.ssh/id_ed25519.pub.
 
 NXT
+      ;;
+    console_later)
+      cat <<EOF
+• Paste manually on this host: append one line from the laptop’s ~/.ssh/id_ed25519.pub to ~${BACKR_USER}/.ssh/authorized_keys (mode 600; directory .ssh mode 700).
+
+EOF
+      ;;
+    other_admin | unknown)
+      cat <<EOF
+• Coordinate with whoever admins SSH on this box — they need the laptop’s single-line pubkey in ${BACKR_USER}’s authorized_keys.
+
+EOF
       ;;
   esac
 
@@ -493,84 +446,6 @@ count_pubkey_lines_in_authorized_keys() {
     fi
   done <"$ak"
   echo "$n"
-}
-
-#
-# Inputs: path to aggregate tempfile written by caller. Reads BACKR_CLI_* and BACKR_AUTHORIZED_KEYS env.
-# Outputs: validated pubkey lines only (one per line) into $1.
-#
-build_pubkey_aggregate_file() {
-  local out="$1"
-  : >"$out"
-  local f line
-  for f in "${BACKR_CLI_PUBKEY_FILES[@]:-}"; do
-    [[ -f "$f" ]] || die "pubkey file not found: $f"
-    # External: cat copies file contents into the aggregate (inputs: file path; outputs: stdout lines).
-    cat "$f" >>"$out"
-  done
-  for line in "${BACKR_CLI_PUBKEY_LINES[@]:-}"; do
-    printf '%s\n' "$line" >>"$out"
-  done
-  if [[ -n "${BACKR_AUTHORIZED_KEYS:-}" ]]; then
-    printf '%s\n' "${BACKR_AUTHORIZED_KEYS}" >>"$out"
-  fi
-}
-
-#
-# Inputs: none — reads pubkey aggregate via build_pubkey_aggregate_file.
-# Outputs: merges unique valid pubkey lines into ~backup/.ssh/authorized_keys (inputs: existing keys + new lines).
-#
-merge_pubkeys_into_authorized_keys() {
-  [[ "$DRY_RUN" -eq 1 ]] && echo "[dry-run] merge pubkey lines into ~${BACKR_USER}/.ssh/authorized_keys" && return 0
-  local home_dir ak agg filtered tmp_out
-  home_dir="$(getent passwd "$BACKR_USER" | cut -d: -f6)"
-  [[ -n "$home_dir" ]] || die "could not resolve home for ${BACKR_USER}"
-  ak="${home_dir}/.ssh/authorized_keys"
-
-  agg="$(mktemp)"
-  filtered="$(mktemp)"
-  tmp_out="$(mktemp)"
-  trap 'rm -f "$agg" "$filtered" "$tmp_out"' RETURN
-
-  build_pubkey_aggregate_file "$agg"
-  # Normalize: drop blanks/comments; keep only plausible pubkey lines.
-  while IFS= read -r line || [[ -n "${line:-}" ]]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [[ -z "$line" ]] && continue
-    [[ "$line" =~ ^# ]] && continue
-    if is_ssh_pubkey_line "$line"; then
-      printf '%s\n' "$line" >>"$filtered"
-    fi
-  done <"$agg"
-
-  if [[ ! -s "$filtered" ]]; then
-    echo "No pubkey lines supplied — authorized_keys unchanged (use --pubkey, --pubkey-file, or BACKR_AUTHORIZED_KEYS)."
-    return 0
-  fi
-
-  [[ -f "$ak" ]] && cp -a "$ak" "${ak}.bak-backr-$$"
-  : >"$tmp_out"
-  [[ -f "$ak" ]] && cat "$ak" >"$tmp_out"
-  local k added=0
-  while IFS= read -r k || [[ -n "${k:-}" ]]; do
-    [[ -z "$k" ]] && continue
-    if grep -Fxq "$k" "$tmp_out" 2>/dev/null; then
-      continue
-    fi
-    printf '%s\n' "$k" >>"$tmp_out"
-    added=$((added + 1))
-    echo "Authorized key added for ${BACKR_USER} (${k:0:24}…)"
-  done <"$filtered"
-
-  if [[ "$added" -eq 0 ]]; then
-    echo "All supplied keys were already present in authorized_keys."
-    return 0
-  fi
-
-  run_cmd cp "$tmp_out" "$ak"
-  run_cmd chown "${BACKR_USER}:${BACKR_USER}" "$ak"
-  run_cmd chmod 600 "$ak"
 }
 
 #
@@ -782,6 +657,64 @@ ensure_ssh_dir() {
 }
 
 #
+# Inputs: $1 absolute authorized_keys path; $2 one candidate line; $3 BACKR_USER for chown.
+# Outputs: appends the line when it is a valid OpenSSH pubkey and not already present; otherwise no-op or warning.
+# External: grep -Fxq tests exact-line membership (inputs: pattern line + file; outputs: exit status).
+#
+append_one_trust_pubkey_line_if_new() {
+  local ak="$1" candidate="$2" owner="$3"
+  candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+  candidate="${candidate%"${candidate##*[![:space:]]}"}"
+  [[ -n "$candidate" ]] || return 0
+  [[ "$candidate" =~ ^# ]] && return 0
+  if ! is_ssh_pubkey_line "$candidate"; then
+    echo "warning: skipping non-pubkey line in trust pubkey input (expected ssh-ed25519, ssh-rsa, …)" >&2
+    return 0
+  fi
+  if grep -Fxq -- "$candidate" "$ak" 2>/dev/null; then
+    echo "Trust pubkey line already in ${ak} — skipping duplicate."
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] append one trust pubkey line to ${ak}"
+    return 0
+  fi
+  printf '%s\n' "$candidate" >>"$ak"
+  run_cmd chown "${owner}:${owner}" "$ak"
+  run_cmd chmod 600 "$ak"
+  echo "Appended trust pubkey to ${ak}."
+}
+
+#
+# Inputs: globals TRUST_PUBKEY_FILE_CLI, BACKR_TRUST_PUBKEY_FILE, BACKR_TRUST_PUBKEY, BACKR_USER, DRY_RUN.
+# Outputs: merges new pubkey lines into ~BACKR_USER/.ssh/authorized_keys when provided (CLI file wins over env file path).
+# External: read reads file lines (inputs: fd; outputs: line variable).
+#
+append_trust_pubkeys_from_cli_or_env() {
+  local home_dir="" ak="" eff_file="" line=""
+  home_dir="$(getent passwd "$BACKR_USER" | cut -d: -f6)"
+  [[ -n "$home_dir" ]] || die "could not resolve home for ${BACKR_USER}"
+  ak="${home_dir}/.ssh/authorized_keys"
+  [[ -f "$ak" ]] || die "internal: authorized_keys missing — ensure_ssh_dir must run first"
+
+  eff_file="${TRUST_PUBKEY_FILE_CLI:-${BACKR_TRUST_PUBKEY_FILE:-}}"
+  if [[ -n "$eff_file" ]]; then
+    [[ -f "$eff_file" ]] || die "trust pubkey file not found: ${eff_file}"
+    [[ -r "$eff_file" ]] || die "trust pubkey file not readable: ${eff_file}"
+    echo "Reading trust pubkeys from: ${eff_file}"
+    while IFS= read -r line || [[ -n "${line:-}" ]]; do
+      append_one_trust_pubkey_line_if_new "$ak" "$line" "$BACKR_USER"
+    done <"$eff_file"
+  fi
+
+  if [[ -n "${BACKR_TRUST_PUBKEY:-}" ]]; then
+    while IFS= read -r line || [[ -n "${line:-}" ]]; do
+      append_one_trust_pubkey_line_if_new "$ak" "$line" "$BACKR_USER"
+    done <<<"${BACKR_TRUST_PUBKEY}"
+  fi
+}
+
+#
 # Inputs: backup account home. Outputs: SELinux ssh_home_t on ~/.ssh when SELinux is enforcing (inputs: paths only).
 # External: restorecon fixes contexts on RHEL/Fedora-family when mcstrans/sshd enforce labeling.
 #
@@ -918,6 +851,8 @@ EOF
 From your laptop (passwordless once pubkey is installed for ${BACKR_USER}):
   ssh ${BACKR_USER}@$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo THIS_HOST)
 
+Trust laptops from this machine: Backr sidebar «Trust keys» (#/host/trust), or append ~/.ssh/id_ed25519.pub on the laptop as one line to ~${BACKR_USER}/.ssh/authorized_keys.
+
 EOF
 }
 
@@ -932,7 +867,7 @@ main() {
   ensure_user_exists
   ensure_backup_tree
   ensure_ssh_dir
-  merge_pubkeys_into_authorized_keys
+  append_trust_pubkeys_from_cli_or_env
   sshd_write_backr_drop_in "$DRY_RUN"
 
   local home_for_selinux

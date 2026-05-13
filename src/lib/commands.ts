@@ -14,6 +14,7 @@ import type {
   HostProjectRow,
   HostVolumeSummary,
 } from "../types/hostDashboard";
+import type { HostTrustAppendResult, HostTrustStatus } from "../types/hostTrust";
 import type { ShellBootstrap } from "../types/shellBootstrap";
 import type { SystemInfo } from "../types/systemInfo";
 import * as devMockBackend from "./devMock/backend";
@@ -72,6 +73,32 @@ export async function hostDiskInventory(
   return invoke<HostDiskInventory>("host_disk_inventory", {
     backupRoot,
     forceRefresh,
+  });
+}
+
+/**
+ * Reads authorized_keys stats for the backup-host Trust page.
+ *
+ * External: `invoke` → `host_trust_status`.
+ */
+export async function hostTrustStatus(): Promise<HostTrustStatus> {
+  if (useDevMock()) {
+    return devMockBackend.mockHostTrustStatus();
+  }
+  return invoke<HostTrustStatus>("host_trust_status");
+}
+
+/**
+ * Appends one pubkey line from the Trust UI (or returns sudo fallback text).
+ *
+ * External: `invoke` → `host_append_authorized_pubkey`.
+ */
+export async function hostAppendAuthorizedPubkey(pubkeyLine: string): Promise<HostTrustAppendResult> {
+  if (useDevMock()) {
+    return devMockBackend.mockHostAppendAuthorizedPubkey(pubkeyLine);
+  }
+  return invoke<HostTrustAppendResult>("host_append_authorized_pubkey", {
+    pubkey_line: pubkeyLine,
   });
 }
 

@@ -5,6 +5,7 @@
 
 import DashboardView from "./components/dashboard/DashboardView.svelte";
 import HostDashboardView from "./components/host/HostDashboardView.svelte";
+import HostTrustKeysView from "./components/host/HostTrustKeysView.svelte";
 import ProjectView from "./components/project/ProjectView.svelte";
 import SetupWizard from "./components/setup/SetupWizard.svelte";
 import SnapshotBrowserView from "./components/snapshot/SnapshotBrowserView.svelte";
@@ -12,6 +13,7 @@ import SnapshotBrowserView from "./components/snapshot/SnapshotBrowserView.svelt
 /** `svelte-spa-router` path → component associations sorted depth-first for readability. */
 export default {
   "/setup": SetupWizard,
+  "/host/trust": HostTrustKeysView,
   "/host": HostDashboardView,
   "/": DashboardView,
   "/project/:name": ProjectView,
