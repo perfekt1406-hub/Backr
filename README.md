@@ -48,7 +48,7 @@ The remote backup host must provide **`rsync`** and SSH access; **`setup-backup-
    Interactive setup asks **two things**: SSH port and (if you didn’t pass `--backup-host`) an optional backup host. After setup, if pubkey SSH still fails, it offers **`ssh-copy-id`** by default; **Trust keys** stays the fallback when passwords aren’t allowed.
 3. **Launch Backr** from the app menu and finish the in-app setup wizard.
 
-Both scripts ask a **short questionnaire** when there is a **usable interactive terminal**. **Laptop** uses **`@clack/prompts`** when Node is available; otherwise **`dialog`** / typed prompts — **two questions** (SSH port + optional backup host unless **`--backup-host`** is already set). **Backup host** stays **bash + `dialog`** (**two questions**: how clients reach SSH, how pubkeys get into **`authorized_keys`**). **`curl … | sudo bash`** works best with a real TTY (use **`ssh -t`** if prompts disappear). **`BACKR_NON_INTERACTIVE=1`** / **`--non-interactive`** or no TTY skips prompts.
+Both scripts run a **short questionnaire** when there is a **usable interactive terminal**. Questions use **Node @clack/prompts** in the terminal (keyboard-driven, not a separate GUI window). The **backup host** script installs **Node.js 18+** and `@clack/prompts` in a temp directory when needed (e.g. `curl … | sudo bash` without a repo clone); the **laptop** script uses the repo’s `npm` dependencies. **`curl … | sudo bash`** works best with a real TTY (use **`ssh -t`** if prompts disappear). **`BACKR_NON_INTERACTIVE=1`** / **`--non-interactive`** or no TTY skips prompts.
 
 ### 1. Clone
 
@@ -166,7 +166,7 @@ Per-project snapshot counts and “last backup” labels on the **dashboard** ar
 |------|------|
 | `src/` | Svelte 5 UI, routes, stores, and TypeScript command wrappers. |
 | `src-tauri/` | Rust crate: config, scheduler, tray, rsync/SSH backup, Tauri commands. |
-| `scripts/` | `setup-backup-host.sh` & `setup-connecting-client.sh`: bootstrap + optional **questionnaires** → **tailored next steps**; laptop script offers **`ssh-copy-id`** by default when **`--backup-host`** probe fails (unless **`--no-ssh-copy-id`**); Trust keys **`#/host/trust`** as fallback; **`--non-interactive`** skips prompts (pipes/CI). |
+| `scripts/` | `setup-backup-host.sh` & `setup-connecting-client.sh`: bootstrap + **@clack/prompts** questionnaires → tailored next steps; laptop script offers **`ssh-copy-id`** by default when **`--backup-host`** probe fails (unless **`--no-ssh-copy-id`**); Trust keys **`#/host/trust`** as fallback; **`--non-interactive`** skips prompts (pipes/CI). |
 
 UI design notes can live in `brand-aesthetic.md` locally (that filename is gitignored).
 

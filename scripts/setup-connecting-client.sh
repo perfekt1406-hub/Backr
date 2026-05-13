@@ -5,7 +5,7 @@
 # Role: Distro-aware OS packages for Tauri (WebKitGTK, SSL, build tools), Node.js LTS,
 #       Rust via rustup (respecting src-tauri/Cargo.toml rust-version), OpenSSH client + rsync, git/curl;
 #       npm ci/npm install; optional projects dir + SSH key; npm run tauri:build + AppImage install unless --deps-only;
-#       minimal questionnaire (OpenClaw-style @clack/prompts when Node + deps exist; else dialog / typed fallback):
+#       minimal questionnaire via Node @clack/prompts (scripts/backr-connecting-survey.mjs); requires Node 18+ and @clack/prompts in the repo.
 #       SSH port + optional backup host; default ssh-copy-id when --backup-host BatchMode probe fails (Trust keys fallback),
 #       tailored hints when /dev/tty exists.
 #
@@ -158,17 +158,6 @@ parse_args() {
 }
 
 #
-# Inputs: message lines as arguments. Outputs: writes each line to /dev/tty, or stderr if /dev/tty is not writable.
-# External: printf writes text (inputs: format + args; outputs: bytes to redirected fd).
-#
-survey_print_tty_client() {
-  local line
-  for line in "$@"; do
-    printf '%s\n' "$line" >/dev/tty 2>/dev/null || printf '%s\n' "$line" >&2
-  done
-}
-
-#
 # Inputs: none. Outputs: returns 0 when this process can open /dev/tty read-write (usable questionnaire session).
 # Notes: [[ -c /dev/tty ]] is insufficient on headless contexts — probe open instead (same as backup-host helper).
 #
@@ -178,98 +167,18 @@ survey_tty_is_usable_client() {
 }
 
 #
-# Inputs: none (uses detect_pkg_backend + run_privileged). Outputs: installs dialog when missing on supported Linux distros;
-#         silent no-op when dialog/whiptail already present; returns non-zero on failure (caller falls back to typed menu).
-# External: apt-get/dnf/yum/pacman/zypper/apk — same families as install_connecting_os_packages.
-#
-ensure_survey_tui_pkg_connecting() {
-  command -v dialog &>/dev/null && return 0
-  command -v whiptail &>/dev/null && return 0
-  [[ "$(uname -s)" == "Linux" ]] || return 1
-  local backend
-  backend="$(detect_pkg_backend)"
-  printf '%s\n' "Backr: installing «dialog» for interactive setup prompts (backend: ${backend})…" >&2
-  case "$backend" in
-    apt)
-      apt_update_once
-      run_privileged apt-get install -y dialog || return 1
-      ;;
-    dnf)
-      run_privileged dnf install -y dialog || return 1
-      ;;
-    yum)
-      run_privileged yum install -y dialog || return 1
-      ;;
-    pacman)
-      run_privileged pacman -Sy --noconfirm dialog || return 1
-      ;;
-    zypper)
-      run_privileged zypper --non-interactive refresh
-      run_privileged zypper --non-interactive install -y dialog || return 1
-      ;;
-    apk)
-      run_privileged apk update
-      run_privileged apk add --no-cache dialog || return 1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-  command -v dialog &>/dev/null || command -v whiptail &>/dev/null
-}
-
-#
-# Inputs: $1 question text, $2–$4 three option strings (fourth is always «I'll set it up myself»).
-# Outputs: single digit 1–4 on stdout (defaults to 4 on cancel/invalid); uses dialog or whiptail on /dev/tty when available.
-#
-survey_read_menu_4_client() {
-  local title="$1" o1="$2" o2="$3" o3="$4"
-  local line="" choice="" mh=22 mw=78 ih=10
-
-  export TERM="${TERM:-xterm-256color}"
-
-  if command -v dialog &>/dev/null; then
-    choice="$(dialog --stdout --clear --title "Backr setup" --menu "$title" "$mh" "$mw" "$ih" \
-      1 "$o1" 2 "$o2" 3 "$o3" 4 "I'll set it up myself" \
-      </dev/tty 2>/dev/tty)" || choice=""
-    choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
-    [[ "$choice" =~ ^[1-4]$ ]] || choice=4
-    printf '%s' "$choice"
-    return 0
-  fi
-
-  if command -v whiptail &>/dev/null; then
-    export TERM="${TERM:-xterm-256color}"
-    choice="$(whiptail --title "Backr setup" --menu "$title" "$mh" "$mw" "$ih" \
-      "1" "$o1" "2" "$o2" "3" "$o3" "4" "I'll set it up myself" \
-      3>&1 1>&2 2>&3 </dev/tty)" || choice=""
-    choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
-    [[ "$choice" =~ ^[1-4]$ ]] || choice=4
-    printf '%s' "$choice"
-    return 0
-  fi
-
-  survey_print_tty_client ""
-  survey_print_tty_client "$title"
-  survey_print_tty_client "  1) $o1"
-  survey_print_tty_client "  2) $o2"
-  survey_print_tty_client "  3) $o3"
-  survey_print_tty_client "  4) I'll set it up myself"
-  survey_print_tty_client "Choice [1-4]:"
-  read -r line </dev/tty 2>/dev/null || line=""
-  line="$(printf '%s' "$line" | tr -d '[:space:]')"
-  [[ "$line" =~ ^[1-4]$ ]] || line=4
-  printf '%s' "$line"
-}
-
-#
 # Inputs: none — writes SURVEY_CLIENT_* via Node @clack/prompts into a temp env file and sources it.
-# Outputs: returns 0 when the wizard completes; non-zero when Node/clack unavailable or wizard errors.
+# Outputs: returns 0 when the wizard completes; non-zero when Node errors or the script is missing.
 # External: Node runs scripts/backr-connecting-survey.mjs (inputs: --env-file and backup hints; outputs: export lines).
 #
 run_connecting_client_questionnaire_clack() {
   local env_out=""
   env_out="$(mktemp)"
+  [[ -f "$REPO_ROOT/scripts/backr-connecting-survey.mjs" ]] || {
+    rm -f "$env_out"
+    die "missing ${REPO_ROOT}/scripts/backr-connecting-survey.mjs — use a full repo checkout"
+  }
+  command -v node &>/dev/null || die "Node.js is required for the setup wizard — install Node 18+ (see https://nodejs.org/)"
   # External: node executes the ESM survey script (inputs: argv; outputs: env file + exit status).
   if node "$REPO_ROOT/scripts/backr-connecting-survey.mjs" \
     --env-file "$env_out" \
@@ -282,16 +191,6 @@ run_connecting_client_questionnaire_clack() {
   fi
   rm -f "$env_out"
   return 1
-}
-
-#
-# Inputs: none. Outputs: runs the Clack wizard when prerequisites exist; otherwise returns non-zero so bash can fall back.
-#
-run_connecting_client_questionnaire_try_clack() {
-  [[ -f "$REPO_ROOT/scripts/backr-connecting-survey.mjs" ]] || return 1
-  command -v node &>/dev/null || return 1
-  [[ -d "$REPO_ROOT/node_modules/@clack/prompts" ]] || return 1
-  run_connecting_client_questionnaire_clack
 }
 
 #
@@ -311,68 +210,8 @@ run_connecting_client_questionnaire() {
 
   export TERM="${TERM:-xterm-256color}"
 
-  if run_connecting_client_questionnaire_try_clack; then
-    return 0
-  fi
-
-  survey_print_tty_client ""
-  survey_print_tty_client "Using basic terminal prompts (install wizard deps failed or Node unavailable)."
-  survey_print_tty_client ""
-
-  local c="" line=""
-  survey_print_tty_client "=== Backr laptop — 2 quick questions ==="
-  survey_print_tty_client "SSH «public key» = one line in ~/.ssh/id_ed25519.pub (safe to copy). «Trust keys» = Backr paste screen on the backup machine (#/host/trust). Private key stays on this laptop."
-  survey_print_tty_client ""
-  ensure_survey_tui_pkg_connecting || survey_print_tty_client "(Could not install «dialog» — using simple typed 1–4 prompts instead.)"
-
-  SURVEY_CLIENT_NETWORK=unknown
-  SURVEY_CLIENT_SERVER_READY=unknown
-
-  c="$(survey_read_menu_4_client \
-    "Which SSH port does the backup server's sshd listen on (from here)?" \
-    "Default 22" \
-    "Custom — you'll type the port next" \
-    "I'll figure it out after testing connectivity")"
-  case "$c" in
-    1)
-      SURVEY_CLIENT_SSH_PORT=default
-      SURVEY_CLIENT_SSH_CUSTOM_PORT=""
-      ;;
-    2)
-      SURVEY_CLIENT_SSH_PORT=custom
-      survey_print_tty_client "Enter the SSH TCP port on the backup server:"
-      read -r SURVEY_CLIENT_SSH_CUSTOM_PORT </dev/tty 2>/dev/null || SURVEY_CLIENT_SSH_CUSTOM_PORT=""
-      SURVEY_CLIENT_SSH_CUSTOM_PORT="${SURVEY_CLIENT_SSH_CUSTOM_PORT//[^0-9]/}"
-      [[ -z "$SURVEY_CLIENT_SSH_CUSTOM_PORT" ]] && SURVEY_CLIENT_SSH_PORT=unknown
-      ;;
-    3 | 4)
-      SURVEY_CLIENT_SSH_PORT=unknown
-      SURVEY_CLIENT_SSH_CUSTOM_PORT=""
-      ;;
-    *)
-      SURVEY_CLIENT_SSH_PORT=unknown
-      SURVEY_CLIENT_SSH_CUSTOM_PORT=""
-      ;;
-  esac
-
-  if [[ -n "${BACKUP_SSH_TARGET:-}" ]] || [[ -n "${BACKR_BACKUP_HOST:-}" ]]; then
-    SURVEY_CLIENT_HOST_PLAN=cli_ok
-    survey_print_tty_client "Backup host already set from --backup-host or BACKR_BACKUP_HOST — skipping host prompt."
-  else
-    survey_print_tty_client "Backup SSH host for testing after setup (optional). Examples: 192.168.1.50 or backr@nas — empty to skip:"
-    read -r line </dev/tty 2>/dev/null || line=""
-    line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    if [[ -n "$line" ]]; then
-      BACKUP_SSH_TARGET="$line"
-      SURVEY_CLIENT_HOST_PLAN=typed_now
-    else
-      SURVEY_CLIENT_HOST_PLAN=defer
-    fi
-  fi
-
-  survey_print_tty_client ""
-  survey_print_tty_client "Thanks — continuing setup…"
-  survey_print_tty_client ""
+  ensure_clack_prompts_pkg || die "failed to install @clack/prompts — run: cd ${REPO_ROOT} && npm install"
+  run_connecting_client_questionnaire_clack || die "setup wizard failed — fix errors above or use --non-interactive"
 }
 
 #
@@ -397,7 +236,7 @@ NXT
     cat <<'NXT'
 • No usable interactive terminal — questionnaire was skipped (some CI environments, nested terminals, or SSH without a TTY).
 
-  Open a normal terminal locally or use `ssh -t`, then run `./scripts/setup-connecting-client.sh` again for prompts and tailored hints.
+  Open a normal terminal locally or use `ssh -t`, then run `./scripts/setup-connecting-client.sh` again. The wizard uses Node @clack/prompts (`npm install` in the repo installs it).
 
 NXT
   fi
@@ -669,7 +508,7 @@ connecting_client_prepare_interactive_wizard() {
   [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]] && return 0
   survey_tty_is_usable_client || return 0
   ensure_nodejs
-  ensure_clack_prompts_pkg || true
+  ensure_clack_prompts_pkg || die "failed to install @clack/prompts — run: cd ${REPO_ROOT} && npm install"
 }
 
 #

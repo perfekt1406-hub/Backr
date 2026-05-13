@@ -7,7 +7,7 @@
 #       Pubkeys normally via Backr Trust (`#/host/trust`), SSH, or console; optional BACKR_TRUST_PUBKEY / --trust-pubkey-file appends automatically. Match blocks disable SSH passwords for
 #       BACKR_USER once authorized_keys holds keys; UFW/firewalld SSH allowance when already enforcing; SELinux
 #       ~/.ssh contexts when enforcing; prints auto-detected OS/firewall/sshd facts (sshd -T, ss listeners);
-#       optional questionnaire installs dialog when needed for arrow-key menus + tailored next-steps.
+#       optional questionnaire uses Node @clack/prompts (installs Node 18+ + npm deps in /tmp when needed) + tailored next-steps.
 #
 # Typical usage (on the backup machine, one command):
 #   curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash
@@ -29,6 +29,7 @@
 #   BACKR_NON_INTERACTIVE=1 Same as --non-interactive.
 #   BACKR_TRUST_PUBKEY      One-line OpenSSH public key to append if not already present (same effect as a single-line file).
 #   BACKR_TRUST_PUBKEY_FILE Same as --trust-pubkey-file when the CLI flag is not passed.
+#   BACKR_SCRIPTS_RAW_BASE  Base URL for raw scripts when this file is piped from curl (default: GitHub main scripts/).
 
 set -euo pipefail
 
@@ -47,6 +48,7 @@ SURVEY_SSH_PORT="${SURVEY_SSH_PORT:-unknown}"
 SURVEY_SSH_CUSTOM_PORT="${SURVEY_SSH_CUSTOM_PORT:-}"
 SURVEY_PLATFORM="${SURVEY_PLATFORM:-unknown}"
 SURVEY_KEYPATH="${SURVEY_KEYPATH:-unknown}"
+BACKR_SCRIPTS_RAW_BASE="${BACKR_SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts}"
 
 die() {
   echo "error: $*" >&2
@@ -54,7 +56,7 @@ die() {
 }
 
 usage() {
-  sed -n '2,31p' "$0"
+  sed -n '2,32p' "$0"
 }
 
 parse_args() {
@@ -99,17 +101,6 @@ parse_args() {
 }
 
 #
-# Inputs: message lines as arguments. Outputs: writes each line to /dev/tty, or stderr if /dev/tty is not writable.
-# External: printf writes text (inputs: format + args; outputs: bytes to redirected fd).
-#
-survey_print_tty() {
-  local line
-  for line in "$@"; do
-    printf '%s\n' "$line" >/dev/tty 2>/dev/null || printf '%s\n' "$line" >&2
-  done
-}
-
-#
 # Inputs: none. Outputs: returns 0 when this process can open /dev/tty read-write (usable questionnaire session).
 # Notes: [[ -c /dev/tty ]] matches character devices that are still unusable on headless/cloud contexts — probe open instead.
 #
@@ -119,92 +110,67 @@ survey_tty_is_usable() {
 }
 
 #
-# Inputs: none — must run as root. Outputs: installs dialog when missing on supported distros; no-op if dialog/whiptail exists.
-# External: apt-get/dnf/yum/pacman/zypper/apk — aligned with install_server_ssh_rsync package families.
+# Inputs: none — must run as root. Outputs: ensures Node.js 18+ and npm for @clack/prompts (same distros as install_server_ssh_rsync).
+# External: apt-get/curl NodeSource setup_22.x, dnf/yum/pacman/zypper/apk install nodejs + npm where applicable.
 #
-ensure_survey_tui_pkg_host() {
-  command -v dialog &>/dev/null && return 0
-  command -v whiptail &>/dev/null && return 0
+ensure_nodejs_for_host_survey() {
+  if command -v node &>/dev/null && command -v npm &>/dev/null; then
+    local major
+    major="$(node -p 'parseInt(process.versions.node,10)' 2>/dev/null || echo 0)"
+    if [[ "${major:-0}" -ge 18 ]]; then
+      echo "Node.js OK for setup wizard: $(node --version)"
+      return 0
+    fi
+    echo "Node.js too old for @clack/prompts — upgrading …" >&2
+  fi
+
   local backend
   backend="$(detect_pkg_backend)"
-  printf '%s\n' "Backr: installing «dialog» for interactive setup prompts (backend: ${backend})…" >&2
+  echo "Installing Node.js 18+ for the Backr setup wizard (backend: ${backend})…" >&2
   export DEBIAN_FRONTEND=noninteractive
+
   case "$backend" in
     apt)
       apt-get update -qq
-      apt-get install -y dialog || return 1
+      apt-get install -y ca-certificates curl gnupg
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      apt-get update -qq
+      apt-get install -y nodejs
       ;;
     dnf)
-      dnf install -y dialog || return 1
+      dnf install -y nodejs npm
       ;;
     yum)
-      yum install -y dialog || return 1
+      yum install -y nodejs npm || die "yum nodejs missing — install Node.js 18+ manually (see https://nodejs.org/)"
       ;;
     pacman)
-      pacman -Sy --noconfirm dialog || return 1
+      pacman -Sy --noconfirm nodejs npm
       ;;
     zypper)
       zypper --non-interactive refresh
-      zypper --non-interactive install -y dialog || return 1
+      zypper --non-interactive install -y nodejs22 npm22 2>/dev/null ||
+        zypper --non-interactive install -y nodejs npm
       ;;
     apk)
       apk update
-      apk add --no-cache dialog || return 1
+      apk add --no-cache nodejs npm
       ;;
     *)
-      return 1
+      die "unsupported distro for automatic Node install — install Node.js 18+ manually, then re-run this script"
       ;;
   esac
-  command -v dialog &>/dev/null || command -v whiptail &>/dev/null
+
+  command -v node &>/dev/null || die "node not found after install"
+  command -v npm &>/dev/null || die "npm not found after install"
+  major="$(node -p 'parseInt(process.versions.node,10)' 2>/dev/null || echo 0)"
+  [[ "${major:-0}" -ge 18 ]] || die "Node.js 18+ required for setup wizard (got $(node --version 2>/dev/null || echo none))"
+  echo "Node.js OK: $(node --version) / npm $(npm --version)"
 }
 
 #
-# Inputs: $1 question text, $2–$4 three option strings (fourth is always «I'll set it up myself»).
-# Outputs: emits choice 1–4 on stdout (defaults to 4 when cancelled/invalid); prefers dialog then whiptail on /dev/tty.
-#
-survey_read_menu_4() {
-  local title="$1" o1="$2" o2="$3" o3="$4"
-  local line="" choice="" mh=22 mw=78 ih=10
-
-  export TERM="${TERM:-xterm-256color}"
-
-  if command -v dialog &>/dev/null; then
-    choice="$(dialog --stdout --clear --title "Backr setup" --menu "$title" "$mh" "$mw" "$ih" \
-      1 "$o1" 2 "$o2" 3 "$o3" 4 "I'll set it up myself" \
-      </dev/tty 2>/dev/tty)" || choice=""
-    choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
-    [[ "$choice" =~ ^[1-4]$ ]] || choice=4
-    printf '%s' "$choice"
-    return 0
-  fi
-
-  if command -v whiptail &>/dev/null; then
-    export TERM="${TERM:-xterm-256color}"
-    choice="$(whiptail --title "Backr setup" --menu "$title" "$mh" "$mw" "$ih" \
-      "1" "$o1" "2" "$o2" "3" "$o3" "4" "I'll set it up myself" \
-      3>&1 1>&2 2>&3 </dev/tty)" || choice=""
-    choice="$(printf '%s' "$choice" | tr -d '[:space:]')"
-    [[ "$choice" =~ ^[1-4]$ ]] || choice=4
-    printf '%s' "$choice"
-    return 0
-  fi
-
-  survey_print_tty ""
-  survey_print_tty "$title"
-  survey_print_tty "  1) $o1"
-  survey_print_tty "  2) $o2"
-  survey_print_tty "  3) $o3"
-  survey_print_tty "  4) I'll set it up myself"
-  survey_print_tty "Choice [1-4]:"
-  read -r line </dev/tty 2>/dev/null || line=""
-  line="$(printf '%s' "$line" | tr -d '[:space:]')"
-  [[ "$line" =~ ^[1-4]$ ]] || line=4
-  printf '%s' "$line"
-}
-
-#
-# Runs an interactive questionnaire when a usable controlling tty exists and BACKR_NON_INTERACTIVE is unset.
-# Outputs: fills SURVEY_* globals used by emit_backup_host_custom_next_steps.
+# Runs an interactive @clack/prompts questionnaire when a usable TTY exists and BACKR_NON_INTERACTIVE is unset.
+# Outputs: fills SURVEY_* globals used by emit_backup_host_custom_next_steps (sources a temp env file from Node).
+# External: node runs scripts/backr-host-survey.mjs; npm installs @clack/prompts in a temp dir; curl may fetch the mjs from BACKR_SCRIPTS_RAW_BASE.
 #
 run_backup_host_questionnaire() {
   [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]] && return 0
@@ -214,43 +180,53 @@ run_backup_host_questionnaire() {
     return 0
   fi
 
-  # curl … | sudo bash leaves stdin on a pipe — attach stdin to the real terminal so menus and reads behave consistently.
+  # curl … | sudo bash leaves stdin on a pipe — attach stdin to the real terminal so Clack reads behave consistently.
   if [[ ! -t 0 ]]; then
     exec </dev/tty 2>/dev/null || true
   fi
 
   export TERM="${TERM:-xterm-256color}"
 
-  local c=""
-  survey_print_tty ""
-  survey_print_tty "=== Backr backup host — 2 quick questions ==="
-  survey_print_tty "Terms: SSH \"public key\" = one line from the laptop's ~/.ssh/id_ed25519.pub (safe to share). \"Trust keys\" = Backr app screen (#/host/trust) to paste it. authorized_keys = server file listing allowed keys for login."
-  survey_print_tty "Option 4 is «I'll figure it out» — shorter hints at the end."
-  survey_print_tty ""
-  ensure_survey_tui_pkg_host || survey_print_tty "(Could not install «dialog» — using simple typed 1–4 prompts instead.)"
+  ensure_nodejs_for_host_survey
 
-  SURVEY_DEPLOYMENT=unknown
-  SURVEY_SSH_PORT=unknown
-  SURVEY_SSH_CUSTOM_PORT=""
-  SURVEY_PLATFORM=unknown
+  local work="" mjs="" env_out="" survey_src="" base=""
+  work="$(mktemp -d "${TMPDIR:-/tmp}/backr-host-survey.XXXXXX")"
 
-  c="$(survey_read_menu_4 \
-    "How will backup laptops reach SSH on this machine?" \
-    "Same LAN only (private IPs)" \
-    "Over the internet (public IP, DDNS, port forward)" \
-    "VPN to this network first")"
-  case "$c" in 1) SURVEY_REACH=lan_only ;; 2) SURVEY_REACH=internet ;; 3) SURVEY_REACH=vpn ;; *) SURVEY_REACH=unknown ;; esac
+  mjs="${work}/backr-host-survey.mjs"
+  survey_src=""
+  if [[ -n "${BASH_SOURCE[0]:-}" ]] && [[ -f "${BASH_SOURCE[0]}" ]] && [[ "${BASH_SOURCE[0]}" != /dev/* ]]; then
+    survey_src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/backr-host-survey.mjs"
+  fi
+  if [[ -n "$survey_src" ]] && [[ -f "$survey_src" ]]; then
+    cp -f "$survey_src" "$mjs"
+  else
+    command -v curl &>/dev/null || {
+      rm -rf "$work"
+      die "curl required to fetch setup wizard (install curl or run from a git clone with scripts/)"
+    }
+    base="${BACKR_SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts}"
+    curl -fsSL "${base}/backr-host-survey.mjs" -o "$mjs" || {
+      rm -rf "$work"
+      die "failed to download backr-host-survey.mjs from ${base} (set BACKR_SCRIPTS_RAW_BASE if needed)"
+    }
+  fi
 
-  c="$(survey_read_menu_4 \
-    "How will each laptop's public key get into ${BACKR_USER}'s authorized_keys?" \
-    "Backr on this machine → Trust keys (#/host/trust)" \
-    "SSH or console — edit ~/.ssh/authorized_keys manually" \
-    "Someone else administers SSH here")"
-  case "$c" in 1) SURVEY_KEYPATH=backr_trust_ui ;; 2) SURVEY_KEYPATH=console_later ;; 3) SURVEY_KEYPATH=other_admin ;; *) SURVEY_KEYPATH=unknown ;; esac
+  if ! (cd "$work" && npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund '@clack/prompts@^1.3.0' >/dev/null); then
+    rm -rf "$work"
+    die "failed to install @clack/prompts for setup wizard (check npm / network)"
+  fi
 
-  survey_print_tty ""
-  survey_print_tty "Thanks — continuing setup…"
-  survey_print_tty ""
+  env_out="$(mktemp)"
+  if ! (cd "$work" && node backr-host-survey.mjs --env-file "$env_out" --backr-user="${BACKR_USER}"); then
+    rm -f "$env_out"
+    rm -rf "$work"
+    die "setup wizard failed or was interrupted"
+  fi
+
+  # shellcheck disable=SC1090
+  source "$env_out"
+  rm -f "$env_out"
+  rm -rf "$work"
 }
 
 #
@@ -285,6 +261,7 @@ No usable interactive terminal — questionnaire was skipped (common with SSH wi
 
   • Prefer an ordinary login shell: `ssh -t user@HOST`, then `curl … | sudo bash` from there — or clone the repo and run `sudo bash scripts/setup-backup-host.sh`.
   • Add `--non-interactive` when you intentionally want zero prompts on headless installs.
+  • Interactive setup needs Node.js 18+ and runs a short @clack/prompts wizard (installed automatically when possible).
 
 NXT
   fi
