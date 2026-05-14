@@ -878,27 +878,24 @@ refresh_host_application_launcher_caches() {
 }
 
 #
-# Inputs: $1 absolute path to the downloaded AppImage, $2 target username, $3 their home directory.
-# Outputs: installs Backr AppImage + host-mode .desktop entry for the desktop user.
-#          The .desktop Exec line sets BACKR_HOST_MODE=1 so the app always boots into the host dashboard.
-#          /etc/backr/host.toml (written by write_host_marker) also triggers host mode without the env var.
+# Inputs: $1 target username, $2 their home directory.
+# Outputs: writes the host-mode .desktop entry to ~/.local/share/applications/ and refreshes
+#          launcher caches. Safe to call before the AppImage is downloaded — TryExec is omitted
+#          so the entry is always visible in the app menu even when the binary is not yet present.
 #
-install_host_appimage_desktop_integration() {
-  local src="$1" target_user="$2" target_home="$3"
-  [[ -f "$src" ]] || die "AppImage not found: $src"
-
+install_host_desktop_entry() {
+  local target_user="$1" target_home="$2"
   local dest_dir="${target_home}/.local/share/backr"
   local dest="${dest_dir}/Backr.AppImage"
-
-  mkdir -p "$dest_dir"
-  install -m 755 -o "$target_user" -g "$target_user" "$src" "$dest"
-
-  install_host_backr_icon_to_user_theme "$target_user" "$target_home"
-
   local desktop_dir="${target_home}/.local/share/applications"
-  mkdir -p "$desktop_dir"
   local desktop="${desktop_dir}/com.backr.app.desktop"
 
+  mkdir -p "$dest_dir" "$desktop_dir"
+  install_host_backr_icon_to_user_theme "$target_user" "$target_home"
+
+  # TryExec is intentionally omitted — some launchers hide entries whose TryExec binary
+  # is missing. Omitting it means the entry always appears; clicking it before the
+  # AppImage is downloaded will simply do nothing.
   cat >"$desktop" <<EOF
 [Desktop Entry]
 Version=1.5
@@ -907,7 +904,6 @@ Name=Backr (Host Dashboard)
 GenericName=Backup host dashboard
 Comment=Backr host-dashboard — inspect backups and trust client keys (rsync over SSH)
 Exec=env BACKR_HOST_MODE=1 ${dest} %u
-TryExec=${dest}
 Icon=com.backr.app
 Terminal=false
 Categories=Utility;Archiving;Network;
@@ -915,19 +911,33 @@ Keywords=backup;rsync;snapshot;Backr;ssh;host;
 StartupNotify=true
 StartupWMClass=com.backr.app
 EOF
-  # Ensure the .desktop file is owned and executable by the desktop user.
   chown "${target_user}:${target_user}" "$desktop"
-  chmod 755 "$desktop"
+  chmod 644 "$desktop"
 
   refresh_host_application_launcher_caches "$target_user" "$target_home"
-  echo "Installed Backr AppImage (host mode): ${dest}"
-  echo "Launcher entry: ${desktop} (search «Backr» in your app menu — the app boots in host-dashboard mode)"
+  echo "Launcher entry written: ${desktop}"
+  echo "  → Search «Backr» in your app menu to open the host dashboard."
+}
+
+#
+# Inputs: $1 absolute path to the downloaded AppImage, $2 target username, $3 their home directory.
+# Outputs: copies AppImage to ~/.local/share/backr/Backr.AppImage (mode 755, owned by target_user).
+#
+install_host_appimage_binary() {
+  local src="$1" target_user="$2" target_home="$3"
+  [[ -f "$src" ]] || die "AppImage not found: $src"
+  local dest_dir="${target_home}/.local/share/backr"
+  local dest="${dest_dir}/Backr.AppImage"
+  mkdir -p "$dest_dir"
+  install -m 755 -o "$target_user" -g "$target_user" "$src" "$dest"
+  echo "Installed Backr AppImage: ${dest}"
 }
 
 #
 # Inputs: HOST_APPIMAGE_URL, HOST_DESKTOP_USER / SUDO_USER (via detect_desktop_user).
-# Outputs: downloads AppImage and installs host-dashboard launcher for the desktop user.
-# Dies on download failure or when no suitable desktop user can be determined.
+# Outputs: always installs the .desktop launcher entry; also downloads the AppImage when
+#          the URL is reachable. Download failure is non-fatal — a manual recovery command
+#          is printed and setup continues.
 #
 install_host_app_from_appimage_url() {
   [[ -n "$HOST_APPIMAGE_URL" ]] || die "internal: install_host_app_from_appimage_url called without a URL"
@@ -945,15 +955,19 @@ install_host_app_from_appimage_url() {
     return 0
   fi
 
+  # Always write the .desktop entry so the app appears in the launcher immediately.
+  install_host_desktop_entry "$target_user" "$target_home"
+
   if ! tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL")"; then
     echo "warning: could not download Backr AppImage from ${HOST_APPIMAGE_URL}" >&2
-    echo "  The rest of host setup completed. Install the app manually later:" >&2
-    echo "  curl -fL -o ~/.local/share/backr/Backr.AppImage ${HOST_APPIMAGE_URL}" >&2
+    echo "  The launcher entry is installed; download the binary manually when available:" >&2
+    local appimage_dest="${target_home}/.local/share/backr/Backr.AppImage"
+    echo "  curl -fL -o ${appimage_dest} ${HOST_APPIMAGE_URL} && chmod +x ${appimage_dest}" >&2
     SKIP_HOST_APPIMAGE=1
     return 1
   fi
   trap 'rm -f "$tmp"' RETURN
-  install_host_appimage_desktop_integration "$tmp" "$target_user" "$target_home"
+  install_host_appimage_binary "$tmp" "$target_user" "$target_home"
 }
 
 #
