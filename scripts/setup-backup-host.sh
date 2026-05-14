@@ -16,9 +16,6 @@
 # Typical usage (on the backup machine, one command):
 #   curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash
 #
-# If raw.githubusercontent.com does not resolve: clone over https://github.com/… and run from disk (no raw host needed):
-#   git clone https://github.com/perfekt1406-hub/Backr.git && cd Backr && sudo ./scripts/setup-backup-host.sh
-#
 # The Backr host-dashboard app is downloaded and installed by default. Use --no-appimage on headless servers.
 #
 # Trust laptops via Backr → Trust keys (#/host/trust) once the app opens, or into ~BACKR_USER/.ssh/authorized_keys.
@@ -42,8 +39,6 @@
 #   BACKR_TRUST_PUBKEY            One-line OpenSSH public key to append if not already present.
 #   BACKR_TRUST_PUBKEY_FILE       Same as --trust-pubkey-file when the CLI flag is not passed.
 #   BACKR_SCRIPTS_RAW_BASE        Base URL for raw scripts when this file is piped from curl (default: GitHub main scripts/).
-#   BACKR_ARCHIVE_TARBALL_URL     Source tarball for host-side AppImage build fallback (default: github.com …/archive/refs/heads/main.tar.gz).
-#                                  Uses github.com, not raw.githubusercontent.com — set this if your network blocks raw only.
 #   BACKR_HOST_APPIMAGE_URL       Override download URL (same as --appimage-url).
 #   BACKR_DEFAULT_APPIMAGE_URL    Override the built-in default release URL without pinning a specific build.
 #   BACKR_NO_HOST_APPIMAGE=1      Same as --no-appimage.
@@ -67,8 +62,6 @@ SURVEY_SSH_CUSTOM_PORT="${SURVEY_SSH_CUSTOM_PORT:-}"
 SURVEY_PLATFORM="${SURVEY_PLATFORM:-unknown}"
 SURVEY_KEYPATH="${SURVEY_KEYPATH:-unknown}"
 BACKR_SCRIPTS_RAW_BASE="${BACKR_SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts}"
-# GitHub archive tarball (github.com — not raw.githubusercontent.com) for source build fallback.
-BACKR_ARCHIVE_TARBALL_URL="${BACKR_ARCHIVE_TARBALL_URL:-https://github.com/perfekt1406-hub/Backr/archive/refs/heads/main.tar.gz}"
 # Default AppImage download URL used when --no-appimage is not passed.
 # Override with --appimage-url or BACKR_HOST_APPIMAGE_URL to use a different build.
 BACKR_DEFAULT_APPIMAGE_URL="${BACKR_DEFAULT_APPIMAGE_URL:-https://github.com/perfekt1406-hub/Backr/releases/latest/download/Backr.AppImage}"
@@ -247,13 +240,10 @@ run_backup_host_questionnaire() {
       die "curl required to fetch setup wizard (install curl or run from a git clone with scripts/)"
     }
     base="${BACKR_SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts}"
-    # Primary: raw.githubusercontent.com. Fallback: jsDelivr gh mirror (different DNS — helps when raw.* does not resolve).
-    if ! curl -fsSL "${base}/backr-host-survey.mjs" -o "$mjs" 2>/dev/null; then
-      if ! curl -fsSL "https://cdn.jsdelivr.net/gh/perfekt1406-hub/Backr@main/scripts/backr-host-survey.mjs" -o "$mjs" 2>/dev/null; then
-        rm -rf "$work"
-        die "failed to download backr-host-survey.mjs (tried ${base} and jsDelivr). Clone the repo and run: sudo ./scripts/setup-backup-host.sh from the checkout, or fix DNS / set BACKR_SCRIPTS_RAW_BASE to a reachable mirror."
-      fi
-    fi
+    curl -fsSL "${base}/backr-host-survey.mjs" -o "$mjs" || {
+      rm -rf "$work"
+      die "failed to download backr-host-survey.mjs from ${base} (set BACKR_SCRIPTS_RAW_BASE if needed)"
+    }
   fi
 
   if ! (cd "$work" && npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund '@clack/prompts@^1.3.0' >/dev/null); then
@@ -884,7 +874,7 @@ build_host_appimage_from_source() {
   # Download source tarball from GitHub.
   local src_dir
   src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
-  local tarball_url="${BACKR_ARCHIVE_TARBALL_URL:-https://github.com/perfekt1406-hub/Backr/archive/refs/heads/main.tar.gz}"
+  local tarball_url="${BACKR_SCRIPTS_RAW_BASE%/scripts}/archive/refs/heads/main.tar.gz"
   echo "Downloading source from ${tarball_url} …"
   if ! curl -fsSL "$tarball_url" | tar -xz -C "$src_dir" --strip-components=1; then
     rm -rf "$src_dir"
@@ -1037,7 +1027,7 @@ Type=Application
 Name=Backr (Host Dashboard)
 GenericName=Backup host dashboard
 Comment=Backr host-dashboard — inspect backups and trust client keys (rsync over SSH)
-Exec=env BACKR_HOST_MODE=1 ${dest} %u
+Exec=env BACKR_HOST_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 ${dest} %u
 Icon=com.backr.app
 Terminal=false
 Categories=Utility;Archiving;Network;
@@ -1175,6 +1165,7 @@ launch_host_dashboard_app() {
   runuser -u "$target_user" -- env \
     "${display_args[@]}" \
     BACKR_HOST_MODE=1 \
+    WEBKIT_DISABLE_DMABUF_RENDERER=1 \
     "$dest" &>/dev/null &
   disown $! 2>/dev/null || true
   echo "Backr host dashboard launched (it may take a moment to appear)."
