@@ -2,34 +2,47 @@
 #
 # Purpose: Turn a generic Linux machine into a Backr backup target with minimal operator effort — packages, sshd,
 #          firewall rules when a manager is already active, authorized_keys scaffold, backup tree, host-dashboard marker,
-#          optional interactive questionnaire + tailored next-steps for facts scripts cannot infer (router/VPN/NAS uncertainty).
+#          Backr AppImage download + host-mode launcher (default), auto-launch of the app after setup, and optional
+#          interactive questionnaire + tailored next-steps.
 # Role: Distro-aware install of OpenSSH server + rsync; validates sshd_config; ensures drop-in snippets load;
 #       Pubkeys normally via Backr Trust (`#/host/trust`), SSH, or console; optional BACKR_TRUST_PUBKEY / --trust-pubkey-file appends automatically. Match blocks disable SSH passwords for
 #       BACKR_USER once authorized_keys holds keys; UFW/firewalld SSH allowance when already enforcing; SELinux
 #       ~/.ssh contexts when enforcing; prints auto-detected OS/firewall/sshd facts (sshd -T, ss listeners);
+#       downloads Backr AppImage by default (BACKR_DEFAULT_APPIMAGE_URL / --appimage-url) and installs a host-mode
+#       .desktop launcher (desktop user auto-detected from SUDO_USER or overridden with --desktop-user); after install,
+#       auto-launches the app so it opens immediately showing the host dashboard; use --no-appimage to skip on headless hosts;
 #       optional questionnaire uses Node @clack/prompts (installs Node 18+ + npm deps in /tmp when needed) + tailored next-steps.
 #
 # Typical usage (on the backup machine, one command):
 #   curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash
 #
-# Trust laptops by pasting each client's ~/.ssh/id_ed25519.pub into Backr → Trust keys (`#/host/trust`) or into ~BACKR_USER/.ssh/authorized_keys over SSH.
+# The Backr host-dashboard app is downloaded and installed by default. Use --no-appimage on headless servers.
+#
+# Trust laptops via Backr → Trust keys (#/host/trust) once the app opens, or into ~BACKR_USER/.ssh/authorized_keys.
 #
 # Run with sudo on the machine that will receive rsync over SSH. Non-Linux hosts are not supported here.
 #
 # CLI options:
-#   --user NAME          Dedicated account (default: backr).
-#   --root PATH          Absolute backup root on disk (default: /srv/backr).
-#   --no-firewall        Do not add SSH allowances to UFW or firewalld even when active.
-#   --non-interactive    Skip the questionnaire and abbreviated default next-steps (for pipes / CI).
-#   --trust-pubkey-file PATH  Append OpenSSH pubkey lines from this file to BACKR_USER's authorized_keys when missing (pairing without manual paste).
-#   --dry-run            Print actions only.
-#   -h, --help           Show this text.
+#   --user NAME               Dedicated account (default: backr).
+#   --root PATH               Absolute backup root on disk (default: /srv/backr).
+#   --no-firewall             Do not add SSH allowances to UFW or firewalld even when active.
+#   --non-interactive         Skip the questionnaire and abbreviated default next-steps (for pipes / CI).
+#   --trust-pubkey-file PATH  Append OpenSSH pubkey lines from this file to BACKR_USER's authorized_keys when missing.
+#   --appimage-url URL        Download this URL instead of the default AppImage release.
+#   --no-appimage             Skip the Backr AppImage download and auto-launch (headless/server installs).
+#   --desktop-user USER       OS user who gets the Backr AppImage + .desktop entry (default: $SUDO_USER or first non-system user).
+#   --dry-run                 Print actions only.
+#   -h, --help                Show this text.
 #
 # Environment:
-#   BACKR_NON_INTERACTIVE=1 Same as --non-interactive.
-#   BACKR_TRUST_PUBKEY      One-line OpenSSH public key to append if not already present (same effect as a single-line file).
-#   BACKR_TRUST_PUBKEY_FILE Same as --trust-pubkey-file when the CLI flag is not passed.
-#   BACKR_SCRIPTS_RAW_BASE  Base URL for raw scripts when this file is piped from curl (default: GitHub main scripts/).
+#   BACKR_NON_INTERACTIVE=1       Same as --non-interactive.
+#   BACKR_TRUST_PUBKEY            One-line OpenSSH public key to append if not already present.
+#   BACKR_TRUST_PUBKEY_FILE       Same as --trust-pubkey-file when the CLI flag is not passed.
+#   BACKR_SCRIPTS_RAW_BASE        Base URL for raw scripts when this file is piped from curl (default: GitHub main scripts/).
+#   BACKR_HOST_APPIMAGE_URL       Override download URL (same as --appimage-url).
+#   BACKR_DEFAULT_APPIMAGE_URL    Override the built-in default release URL without pinning a specific build.
+#   BACKR_NO_HOST_APPIMAGE=1      Same as --no-appimage.
+#   BACKR_HOST_DESKTOP_USER       Same as --desktop-user.
 
 set -euo pipefail
 
@@ -49,6 +62,14 @@ SURVEY_SSH_CUSTOM_PORT="${SURVEY_SSH_CUSTOM_PORT:-}"
 SURVEY_PLATFORM="${SURVEY_PLATFORM:-unknown}"
 SURVEY_KEYPATH="${SURVEY_KEYPATH:-unknown}"
 BACKR_SCRIPTS_RAW_BASE="${BACKR_SCRIPTS_RAW_BASE:-https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts}"
+# Default AppImage download URL used when --no-appimage is not passed.
+# Override with --appimage-url or BACKR_HOST_APPIMAGE_URL to use a different build.
+BACKR_DEFAULT_APPIMAGE_URL="${BACKR_DEFAULT_APPIMAGE_URL:-https://github.com/perfekt1406-hub/Backr/releases/latest/download/Backr.AppImage}"
+# Host-dashboard AppImage install (see install_host_app_from_appimage_url / detect_desktop_user).
+# Resolved in main() — override URL via --appimage-url / BACKR_HOST_APPIMAGE_URL, or skip with --no-appimage / BACKR_NO_HOST_APPIMAGE=1.
+HOST_APPIMAGE_URL="${BACKR_HOST_APPIMAGE_URL:-}"
+HOST_DESKTOP_USER="${BACKR_HOST_DESKTOP_USER:-}"
+SKIP_HOST_APPIMAGE="${BACKR_NO_HOST_APPIMAGE:-0}"
 
 die() {
   echo "error: $*" >&2
@@ -88,6 +109,20 @@ parse_args() {
         TRUST_PUBKEY_FILE_CLI="${2:-}"
         [[ -n "$TRUST_PUBKEY_FILE_CLI" ]] || die "--trust-pubkey-file needs a path"
         shift 2
+        ;;
+      --appimage-url)
+        HOST_APPIMAGE_URL="${2:-}"
+        [[ -n "$HOST_APPIMAGE_URL" ]] || die "--appimage-url needs a URL value"
+        shift 2
+        ;;
+      --desktop-user)
+        HOST_DESKTOP_USER="${2:-}"
+        [[ -n "$HOST_DESKTOP_USER" ]] || die "--desktop-user needs a username value"
+        shift 2
+        ;;
+      --no-appimage)
+        SKIP_HOST_APPIMAGE=1
+        shift
         ;;
       -h | --help)
         usage
@@ -240,6 +275,13 @@ emit_backup_host_custom_next_steps() {
     eff_ports="$(sshd -T 2>/dev/null | grep -i '^port ' | awk '{printf "%s ", $2}' | sed 's/[[:space:]]*$//')"
   fi
 
+  # Gather LAN IPs once — used in the LAN-specific numbered checklist.
+  local lan_ips="" primary_ip=""
+  if command -v hostname &>/dev/null; then
+    lan_ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -n 4 | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)"
+  fi
+  primary_ip="$(echo "$lan_ips" | awk '{print $1}')"
+
   echo ""
   echo "── Your next steps (based on your questionnaire + this machine) ──"
 
@@ -248,8 +290,8 @@ emit_backup_host_custom_next_steps() {
 You used --non-interactive / BACKR_NON_INTERACTIVE — questionnaire was skipped.
 
   • If this was curl | sudo bash: run again from an interactive shell without --non-interactive if you want tailored hints.
-  • Trust path (passwordless **backr**): paste laptop pubkeys via Backr → Trust keys (`#/host/trust`), edit ~BACKR_USER/.ssh/authorized_keys over SSH, or re-run with **--trust-pubkey-file** / **BACKR_TRUST_PUBKEY** to append automatically.
-  • Clients must reach the sshd Port shown in «Auto-detected» above (same for LAN router/VPN/firewall rules).
+  • Trust path (passwordless backr): paste laptop pubkeys via Backr → Trust keys (#/host/trust), edit ~BACKR_USER/.ssh/authorized_keys over SSH, or re-run with --trust-pubkey-file / BACKR_TRUST_PUBKEY to append automatically.
+  • Clients must reach the sshd Port shown above (same for LAN router/VPN/firewall rules).
 
 NXT
     return 0
@@ -266,59 +308,83 @@ No usable interactive terminal — questionnaire was skipped (common with SSH wi
 NXT
   fi
 
-  if [[ "$SURVEY_REACH" == "unknown" ]]; then
-    cat <<'NXT'
+  # ── Reach-specific guidance ──────────────────────────────────────────────────────────────
+
+  case "$SURVEY_REACH" in
+
+    lan_only)
+      cat <<EOF
+• LAN-only path — checklist:
+
+    1. This machine's LAN address(es): ${lan_ips:-run 'ip addr' to find them}
+       SSH port: ${eff_ports:-22}
+
+    2. On each laptop, clone the repo and run:
+         ./scripts/setup-connecting-client.sh
+       The wizard will ask for this machine's IP/hostname and SSH port.
+       It installs deps, builds the AppImage, adds the app launcher, and at the
+       end automatically runs ssh-copy-id to trust the laptop's key on this machine
+       (you type the ${BACKR_USER} account password once at the prompt).
+
+    3. Open Backr on the laptop and complete the in-app setup wizard.
+
+  Note: backups only run while the laptop is on this same LAN — expected behaviour.
+
+EOF
+      ;;
+
+    internet)
+      printf '%s\n' "• Effective sshd TCP ports here: ${eff_ports:-unknown} (full detail above)."
+      cat <<'NXT'
+• Internet exposure: confirm your port-forward / cloud security group allows inbound TCP to the sshd port above; key-only backr is enforced automatically once authorized_keys has at least one key.
+
+NXT
+      ;;
+
+    vpn)
+      printf '%s\n' "• Effective sshd TCP ports here: ${eff_ports:-unknown} (full detail above)."
+      cat <<'NXT'
+• VPN path: document the VPN endpoint for laptops; SSH targets are usually private IPs visible only while VPN is up. Use --ssh-port on the client script when sshd is not on port 22.
+
+NXT
+      ;;
+
+    unknown | *)
+      printf '%s\n' "• Effective sshd TCP ports here: ${eff_ports:-unknown} (full detail above)."
+      cat <<'NXT'
 • You weren't sure how clients reach SSH. Check both paths:
-    LAN: from another device on the same Wi‑Fi/Ethernet, ping this host's private IP and: nc -vz HOST 22 (or your SSH port).
+    LAN:      ping this host's private IP from another device on the same network, then: nc -vz HOST 22 (or your SSH port).
     Internet: ensure your router forwards the SSH port to this machine and/or open the port in your cloud security group.
   If only VPN works, connect VPN first on the laptop before testing SSH.
 
 NXT
+      ;;
+  esac
+
+  # ── Key-trust guidance for non-LAN paths (LAN block above is self-contained) ────────────
+
+  if [[ "$SURVEY_REACH" != "lan_only" ]]; then
+    case "$SURVEY_KEYPATH" in
+      backr_trust_ui)
+        cat <<'NXT'
+• Trust keys: open Backr on this machine → sidebar «Trust keys» (#/host/trust) → paste one full line from the laptop's ~/.ssh/id_ed25519.pub.
+
+NXT
+        ;;
+      console_later)
+        cat <<EOF
+• Manual key install: append one line from the laptop's ~/.ssh/id_ed25519.pub to ~${BACKR_USER}/.ssh/authorized_keys on this machine (file mode 600; .ssh directory mode 700).
+
+EOF
+        ;;
+      other_admin | unknown)
+        cat <<EOF
+• Coordinate with whoever admins SSH on this box — they need each laptop's single-line pubkey added to ${BACKR_USER}'s authorized_keys.
+
+EOF
+        ;;
+    esac
   fi
-
-  case "$SURVEY_REACH" in
-    internet)
-      cat <<'NXT'
-• Internet exposure: confirm port-forward / cloud SG allows inbound TCP to the sshd port shown above; prefer key-only **backr** (already enforced once authorized_keys has keys).
-
-NXT
-      ;;
-    vpn)
-      cat <<'NXT'
-• VPN path: document the VPN endpoint for laptops; SSH targets are usually private IPs visible only while VPN is up.
-
-NXT
-      ;;
-    lan_only)
-      cat <<'NXT'
-• LAN-only: backups fail off-network — that is expected unless you add VPN or split routing.
-
-NXT
-      ;;
-  esac
-
-  printf '%s\n' "• Effective sshd TCP ports here: ${eff_ports:-unknown} (full detail in «Auto-detected» above)."
-
-  case "$SURVEY_KEYPATH" in
-    backr_trust_ui)
-      cat <<'NXT'
-• Use this machine’s Backr window → sidebar «Trust keys» (URL hash #/host/trust). Paste one full line from the laptop’s ~/.ssh/id_ed25519.pub.
-
-NXT
-      ;;
-    console_later)
-      cat <<EOF
-• Paste manually on this host: append one line from the laptop’s ~/.ssh/id_ed25519.pub to ~${BACKR_USER}/.ssh/authorized_keys (mode 600; directory .ssh mode 700).
-
-EOF
-      ;;
-    other_admin | unknown)
-      cat <<EOF
-• Coordinate with whoever admins SSH on this box — they need the laptop’s single-line pubkey in ${BACKR_USER}’s authorized_keys.
-
-EOF
-      ;;
-  esac
 
   echo ""
 }
@@ -707,6 +773,235 @@ selinux_restore_ssh_home_if_enforcing() {
 }
 
 #
+# Outputs: first candidate for the desktop user who should receive the Backr AppImage install.
+# Priority: HOST_DESKTOP_USER global → $SUDO_USER env → first UID≥1000 user with a real home → dies when none found.
+#
+detect_desktop_user() {
+  if [[ -n "${HOST_DESKTOP_USER:-}" ]]; then
+    id "$HOST_DESKTOP_USER" &>/dev/null || die "desktop user '${HOST_DESKTOP_USER}' not found (--desktop-user / BACKR_HOST_DESKTOP_USER)"
+    echo "$HOST_DESKTOP_USER"
+    return 0
+  fi
+  if [[ -n "${SUDO_USER:-}" ]] && id "$SUDO_USER" &>/dev/null; then
+    echo "$SUDO_USER"
+    return 0
+  fi
+  # Fall back to the first local user with UID >= 1000 and a real home.
+  local candidate=""
+  while IFS=: read -r uname _ uid _ _ uhome _; do
+    [[ "${uid:-0}" -ge 1000 ]] || continue
+    [[ -d "${uhome:-}" ]] || continue
+    candidate="$uname"
+    break
+  done </etc/passwd
+  [[ -n "$candidate" ]] ||
+    die "could not detect a desktop user; pass --desktop-user NAME or BACKR_HOST_DESKTOP_USER"
+  echo "$candidate"
+}
+
+#
+# Inputs: $1 HTTPS URL to an AppImage. Outputs: path to a downloaded temp file (caller must rm); non-zero on failure.
+# External: curl fetches URL into a tempfile following redirects.
+#
+download_appimage_to_tempfile() {
+  local url="$1"
+  [[ -n "$url" ]] || die "internal: empty AppImage URL"
+  command -v curl &>/dev/null || die "curl required to download the Backr AppImage"
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/backr-host-appimage.XXXXXX")"
+  # External: curl fetches URL into tmp with fail-on-HTTP-error and location following.
+  if ! curl -fL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  echo "$tmp"
+}
+
+#
+# Inputs: $1 target username, $2 absolute path to their home directory.
+# Outputs: copies Backr PNGs into the user's hicolor icon theme for common grid sizes.
+# External: gtk-update-icon-cache refreshes the hicolor theme index when available.
+#
+install_host_backr_icon_to_user_theme() {
+  local target_user="$1" target_home="$2"
+  # Icons shipped alongside this script in the repo's src-tauri/icons directory.
+  local script_dir=""
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local repo_icons="${script_dir}/../src-tauri/icons"
+
+  [[ -d "$repo_icons" ]] || return 0
+
+  local pair="" src="" dest_size="" icon_dir=""
+  for pair in \
+    "32x32.png|32x32" \
+    "128x128.png|128x128" \
+    "icon.png|256x256"; do
+    src="${repo_icons}/${pair%%|*}"
+    dest_size="${pair##*|}"
+    [[ -f "$src" ]] || continue
+    icon_dir="${target_home}/.local/share/icons/hicolor/${dest_size}/apps"
+    mkdir -p "$icon_dir"
+    install -m 644 -o "$target_user" -g "$target_user" "$src" \
+      "${icon_dir}/com.backr.app.png"
+  done
+
+  if command -v gtk-update-icon-cache &>/dev/null; then
+    local hicolor="${target_home}/.local/share/icons/hicolor"
+    # External: gtk-update-icon-cache rebuilds the hicolor theme index (non-fatal).
+    gtk-update-icon-cache -f -t "$hicolor" &>/dev/null || true
+  fi
+}
+
+#
+# Inputs: $1 target username, $2 absolute path to their home directory.
+# Outputs: refreshes XDG/GNOME/KDE application menu caches so the new .desktop entry is visible.
+# External: update-desktop-database, kbuildsycoca5/6, xdg-desktop-menu — all best-effort, non-fatal.
+#
+refresh_host_application_launcher_caches() {
+  local target_user="$1" target_home="$2"
+  local apps_dir="${target_home}/.local/share/applications"
+  [[ -d "$apps_dir" ]] || return 0
+
+  # Run cache-refresh commands as the desktop user so they read/write user-owned cache files.
+  if command -v update-desktop-database &>/dev/null; then
+    # External: update-desktop-database indexes user's ~/.local/share/applications (inputs: dir; outputs: mimeinfo.cache).
+    runuser -u "$target_user" -- update-desktop-database "$apps_dir" &>/dev/null || true
+  fi
+  if command -v kbuildsycoca6 &>/dev/null; then
+    runuser -u "$target_user" -- kbuildsycoca6 --noincremental &>/dev/null || true
+  elif command -v kbuildsycoca5 &>/dev/null; then
+    runuser -u "$target_user" -- kbuildsycoca5 --noincremental &>/dev/null || true
+  fi
+  if command -v xdg-desktop-menu &>/dev/null; then
+    runuser -u "$target_user" -- xdg-desktop-menu forceupdate &>/dev/null || true
+  fi
+}
+
+#
+# Inputs: $1 absolute path to the downloaded AppImage, $2 target username, $3 their home directory.
+# Outputs: installs Backr AppImage + host-mode .desktop entry for the desktop user.
+#          The .desktop Exec line sets BACKR_HOST_MODE=1 so the app always boots into the host dashboard.
+#          /etc/backr/host.toml (written by write_host_marker) also triggers host mode without the env var.
+#
+install_host_appimage_desktop_integration() {
+  local src="$1" target_user="$2" target_home="$3"
+  [[ -f "$src" ]] || die "AppImage not found: $src"
+
+  local dest_dir="${target_home}/.local/share/backr"
+  local dest="${dest_dir}/Backr.AppImage"
+
+  mkdir -p "$dest_dir"
+  install -m 755 -o "$target_user" -g "$target_user" "$src" "$dest"
+
+  install_host_backr_icon_to_user_theme "$target_user" "$target_home"
+
+  local desktop_dir="${target_home}/.local/share/applications"
+  mkdir -p "$desktop_dir"
+  local desktop="${desktop_dir}/com.backr.app.desktop"
+
+  cat >"$desktop" <<EOF
+[Desktop Entry]
+Version=1.5
+Type=Application
+Name=Backr (Host Dashboard)
+GenericName=Backup host dashboard
+Comment=Backr host-dashboard — inspect backups and trust client keys (rsync over SSH)
+Exec=env BACKR_HOST_MODE=1 ${dest} %u
+TryExec=${dest}
+Icon=com.backr.app
+Terminal=false
+Categories=Utility;Archiving;Network;
+Keywords=backup;rsync;snapshot;Backr;ssh;host;
+StartupNotify=true
+StartupWMClass=com.backr.app
+EOF
+  # Ensure the .desktop file is owned and executable by the desktop user.
+  chown "${target_user}:${target_user}" "$desktop"
+  chmod 755 "$desktop"
+
+  refresh_host_application_launcher_caches "$target_user" "$target_home"
+  echo "Installed Backr AppImage (host mode): ${dest}"
+  echo "Launcher entry: ${desktop} (search «Backr» in your app menu — the app boots in host-dashboard mode)"
+}
+
+#
+# Inputs: HOST_APPIMAGE_URL, HOST_DESKTOP_USER / SUDO_USER (via detect_desktop_user).
+# Outputs: downloads AppImage and installs host-dashboard launcher for the desktop user.
+# Dies on download failure or when no suitable desktop user can be determined.
+#
+install_host_app_from_appimage_url() {
+  [[ -n "$HOST_APPIMAGE_URL" ]] || die "internal: install_host_app_from_appimage_url called without a URL"
+
+  local target_user target_home tmp
+  target_user="$(detect_desktop_user)"
+  target_home="$(getent passwd "$target_user" | cut -d: -f6)"
+  [[ -n "$target_home" ]] || die "could not resolve home directory for user '${target_user}'"
+  [[ -d "$target_home" ]] || die "home directory '${target_home}' for user '${target_user}' does not exist"
+
+  echo "Installing Backr host-dashboard app for user '${target_user}' (home: ${target_home}) …"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] download ${HOST_APPIMAGE_URL}"
+    echo "[dry-run] install AppImage + .desktop for ${target_user} at ${target_home}"
+    return 0
+  fi
+
+  tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL")" ||
+    die "failed to download Backr AppImage from ${HOST_APPIMAGE_URL}"
+  trap 'rm -f "$tmp"' RETURN
+  install_host_appimage_desktop_integration "$tmp" "$target_user" "$target_home"
+}
+
+#
+# Inputs: none — uses detect_desktop_user and the installed AppImage path.
+# Outputs: launches the Backr host-dashboard app as the desktop user in the background.
+#          Detects Wayland or X11 session from the user's XDG_RUNTIME_DIR / DISPLAY.
+#          Silent no-op when no graphical session is found (headless hosts).
+#
+launch_host_dashboard_app() {
+  [[ "$DRY_RUN" -eq 1 ]] && { echo "[dry-run] launch Backr host-dashboard app"; return 0; }
+
+  local target_user target_home target_uid dest xdg_runtime
+  target_user="$(detect_desktop_user 2>/dev/null)" || return 0
+  target_home="$(getent passwd "$target_user" | cut -d: -f6)"
+  target_uid="$(id -u "$target_user" 2>/dev/null)" || return 0
+  dest="${target_home}/.local/share/backr/Backr.AppImage"
+  [[ -f "$dest" ]] || { echo "warning: AppImage not found at ${dest} — skipping auto-launch" >&2; return 0; }
+
+  xdg_runtime="/run/user/${target_uid}"
+
+  # Build the display environment: prefer Wayland, fall back to X11.
+  local display_args=()
+  if [[ -S "${xdg_runtime}/wayland-0" ]]; then
+    display_args=(
+      "WAYLAND_DISPLAY=wayland-0"
+      "XDG_RUNTIME_DIR=${xdg_runtime}"
+    )
+  elif [[ -n "${DISPLAY:-}" ]]; then
+    display_args=(
+      "DISPLAY=${DISPLAY}"
+      "XDG_RUNTIME_DIR=${xdg_runtime}"
+    )
+  elif [[ -S "/tmp/.X11-unix/X0" ]]; then
+    display_args=(
+      "DISPLAY=:0"
+      "XDG_RUNTIME_DIR=${xdg_runtime}"
+    )
+  else
+    echo "No graphical session detected for '${target_user}' — skipping auto-launch. Open Backr from the app menu when logged in."
+    return 0
+  fi
+
+  echo "Launching Backr host dashboard for '${target_user}' …"
+  # External: runuser runs the AppImage as the desktop user; & disowns it so the script exits cleanly.
+  runuser -u "$target_user" -- env \
+    "${display_args[@]}" \
+    BACKR_HOST_MODE=1 \
+    "$dest" &>/dev/null &
+  disown $! 2>/dev/null || true
+  echo "Backr host dashboard launched (it may take a moment to appear)."
+}
+
+#
 # Writes `/etc/backr/host.toml` so Backr can open host-dashboard mode on this machine without a client config.
 #
 write_host_marker() {
@@ -823,12 +1118,20 @@ EOF
   if [[ -n "$ip_line" ]]; then
     printf '  Primary IP:     %s (run ip addr if this box has several interfaces)\n' "$ip_line"
   fi
+  if [[ "${SKIP_HOST_APPIMAGE:-0}" != "1" ]]; then
+    local du=""
+    du="$(detect_desktop_user 2>/dev/null || echo '(desktop-user)')"
+    printf '  Host dashboard: ~/.local/share/backr/Backr.AppImage (installed for %s)\n' "$du"
+    printf '                  App is launching — use Trust keys (#/host/trust) to add laptop keys.\n'
+  else
+    printf '  Host dashboard: skipped (--no-appimage). Use authorized_keys to add client pubkeys.\n'
+  fi
   cat <<EOF
 
-From your laptop (passwordless once pubkey is installed for ${BACKR_USER}):
-  ssh ${BACKR_USER}@$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo THIS_HOST)
-
-Trust laptops from this machine: Backr sidebar «Trust keys» (#/host/trust), or append ~/.ssh/id_ed25519.pub on the laptop as one line to ~${BACKR_USER}/.ssh/authorized_keys.
+On each laptop — clone the Backr repo and run:
+  ./scripts/setup-connecting-client.sh
+The wizard will ask for this machine's IP (${ip_line:-see Primary IP above}) and SSH port.
+It handles deps, AppImage install, and key trust (ssh-copy-id) automatically.
 
 EOF
 }
@@ -853,6 +1156,16 @@ main() {
 
   open_ssh_on_active_managed_firewalls
   write_host_marker
+
+  # Download and install the Backr host-dashboard app by default.
+  # Use --no-appimage / BACKR_NO_HOST_APPIMAGE=1 to skip on headless servers.
+  if [[ "${SKIP_HOST_APPIMAGE:-0}" != "1" ]]; then
+    # --appimage-url / BACKR_HOST_APPIMAGE_URL overrides the default release URL.
+    [[ -n "$HOST_APPIMAGE_URL" ]] || HOST_APPIMAGE_URL="$BACKR_DEFAULT_APPIMAGE_URL"
+    install_host_app_from_appimage_url
+    launch_host_dashboard_app
+  fi
+
   verify_backup_host_ready
   report_detected_ssh_environment
   print_host_ready
