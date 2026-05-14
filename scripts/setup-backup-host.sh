@@ -800,6 +800,130 @@ detect_desktop_user() {
 }
 
 #
+# Inputs: none — uses detect_pkg_backend. Outputs: installs Tauri's system-level build deps as root.
+# Mirrors the Tauri prerequisite list from setup-connecting-client.sh.
+#
+install_host_tauri_system_deps() {
+  local backend
+  backend="$(detect_pkg_backend)"
+  echo "Installing Tauri build dependencies (${backend}) …"
+  case "$backend" in
+    apt)
+      apt-get update -qq
+      apt-get install -y \
+        build-essential pkg-config cmake curl wget git \
+        libwebkit2gtk-4.1-dev libssl-dev \
+        libayatana-appindicator3-dev librsvg2-dev \
+        libxdo-dev file
+      ;;
+    dnf)
+      dnf install -y \
+        curl wget git openssl-devel gcc gcc-c++ make cmake pkgconf-pkg-config \
+        webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel \
+        perl-File-MimeInfo patch
+      ;;
+    pacman)
+      pacman -Sy --noconfirm \
+        base-devel curl wget git openssl \
+        webkit2gtk gtk3 libappindicator-gtk3 librsvg patchelf pkgconf cmake
+      ;;
+    zypper)
+      zypper --non-interactive refresh
+      zypper --non-interactive install -y \
+        curl wget git openssl-devel gcc gcc-c++ cmake pkg-config patch \
+        webkit2gtk4-devel gtk3-devel libayatana-appindicator-devel librsvg-devel libxdo-devel \
+        2>/dev/null ||
+        zypper --non-interactive install -y \
+          curl wget git openssl-devel gcc gcc-c++ cmake pkg-config patch \
+          webkit2gtk-devel gtk3-devel libappindicator-devel librsvg-devel
+      ;;
+    apk)
+      apk add --no-cache \
+        build-base curl wget git openssl-dev \
+        webkit2gtk-dev gtk+3.0-dev librsvg-dev libayatana-indicator-dev bash file
+      ;;
+    *)
+      echo "warning: unknown distro — Tauri system deps may be missing; build may fail" >&2
+      ;;
+  esac
+}
+
+#
+# Inputs: $1 target username, $2 their home directory.
+# Outputs: path to a built Backr.AppImage in a temp dir (caller must clean up the dir).
+#          Installs Tauri system deps (root), downloads source tarball, installs Rust if needed,
+#          builds via 'npm ci && npm run tauri:build' as the target user.
+#          Prints progress to stdout; returns non-zero on failure.
+#
+build_host_appimage_from_source() {
+  local target_user="$1" target_home="$2"
+
+  echo "No pre-built AppImage available — building Backr from source (this takes ~10-20 min on first run) …"
+
+  # Install system-level Tauri build deps (requires root, already running as root).
+  install_host_tauri_system_deps
+
+  # Node.js is already available from ensure_nodejs_for_host_survey() or system install.
+  # Make sure it's present for npm.
+  if ! command -v node &>/dev/null; then
+    echo "Installing Node.js for build …"
+    ensure_nodejs_for_host_survey
+  fi
+  echo "Node: $(node --version 2>/dev/null || echo 'not found')"
+
+  # Download source tarball from GitHub.
+  local src_dir
+  src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
+  local tarball_url="${BACKR_SCRIPTS_RAW_BASE%/scripts}/archive/refs/heads/main.tar.gz"
+  echo "Downloading source from ${tarball_url} …"
+  if ! curl -fsSL "$tarball_url" | tar -xz -C "$src_dir" --strip-components=1; then
+    rm -rf "$src_dir"
+    echo "warning: failed to download source tarball from ${tarball_url}" >&2
+    return 1
+  fi
+
+  # Hand ownership to the target user so Rust/npm write into their home.
+  chown -R "${target_user}:${target_user}" "$src_dir"
+
+  # Install Rust + build the AppImage as the target user.
+  # runuser executes a bash subshell that handles ~/.cargo/env sourcing internally.
+  runuser -u "$target_user" -- bash -s <<USERSCRIPT
+set -euo pipefail
+export CARGO_HOME="\${CARGO_HOME:-\$HOME/.cargo}"
+export RUSTUP_HOME="\${RUSTUP_HOME:-\$HOME/.rustup}"
+export PATH="\$CARGO_HOME/bin:\$PATH"
+
+# Install Rust via rustup when cargo is missing.
+if ! command -v cargo &>/dev/null; then
+  echo "Installing Rust toolchain …"
+  curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | \
+    sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+fi
+[[ -f "\$HOME/.cargo/env" ]] && source "\$HOME/.cargo/env"
+rustup default stable 2>/dev/null || true
+echo "Rust: \$(rustc --version)"
+
+cd "$src_dir"
+echo "Installing npm deps …"
+npm ci
+echo "Building AppImage (Rust compile — please wait) …"
+npm run tauri:build
+USERSCRIPT
+
+  # Find the produced AppImage.
+  local appimage
+  appimage="$(find "$src_dir/src-tauri/target/release/bundle/appimage" -name "*.AppImage" 2>/dev/null | head -1)"
+  if [[ -z "$appimage" ]]; then
+    rm -rf "$src_dir"
+    echo "warning: build completed but no AppImage found under src-tauri/target/release/bundle/appimage" >&2
+    return 1
+  fi
+
+  echo "Build complete: ${appimage}"
+  echo "$appimage"   # caller reads this line as the path
+}
+
+#
 # Inputs: $1 HTTPS URL to an AppImage. Outputs: path to a downloaded temp file (caller must rm); non-zero on failure.
 # External: curl fetches URL into a tempfile following redirects.
 #
@@ -958,16 +1082,30 @@ install_host_app_from_appimage_url() {
   # Always write the .desktop entry so the app appears in the launcher immediately.
   install_host_desktop_entry "$target_user" "$target_home"
 
-  if ! tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL")"; then
-    echo "warning: could not download Backr AppImage from ${HOST_APPIMAGE_URL}" >&2
-    echo "  The launcher entry is installed; download the binary manually when available:" >&2
-    local appimage_dest="${target_home}/.local/share/backr/Backr.AppImage"
-    echo "  curl -fL -o ${appimage_dest} ${HOST_APPIMAGE_URL} && chmod +x ${appimage_dest}" >&2
-    SKIP_HOST_APPIMAGE=1
-    return 1
+  local appimage_src=""
+  local built_src_dir=""
+
+  if tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL" 2>/dev/null)"; then
+    # Pre-built release available — use it directly.
+    appimage_src="$tmp"
+    trap 'rm -f "$appimage_src"' RETURN
+  else
+    echo "Pre-built AppImage not available at ${HOST_APPIMAGE_URL} — falling back to source build …"
+    # build_host_appimage_from_source prints progress and echoes the AppImage path on the last line.
+    local build_out
+    build_out="$(build_host_appimage_from_source "$target_user" "$target_home")" || {
+      echo "warning: source build failed — the launcher entry is installed but the binary is missing." >&2
+      echo "  Re-run this script or build manually: cd /path/to/Backr && npm ci && npm run tauri:build" >&2
+      SKIP_HOST_APPIMAGE=1
+      return 1
+    }
+    # Last line of build output is the AppImage path; the containing dir is the temp src dir.
+    appimage_src="$(echo "$build_out" | tail -1)"
+    built_src_dir="$(dirname "$(dirname "$(dirname "$(dirname "$appimage_src")")")")"
+    trap 'rm -rf "$built_src_dir"' RETURN
   fi
-  trap 'rm -f "$tmp"' RETURN
-  install_host_appimage_binary "$tmp" "$target_user" "$target_home"
+
+  install_host_appimage_binary "$appimage_src" "$target_user" "$target_home"
 }
 
 #
