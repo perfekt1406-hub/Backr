@@ -1292,7 +1292,8 @@ EOF
     local du=""
     du="$(detect_desktop_user 2>/dev/null || echo '(desktop-user)')"
     printf '  Host dashboard: ~/.local/share/backr/Backr.AppImage (installed for %s)\n' "$du"
-    printf '                  App is launching — use Trust keys (#/host/trust) to add laptop keys.\n'
+    printf '                  → It should open automatically. If it did not, search «Backr» in\n'
+    printf '                    your app menu or run: ~/.local/share/backr/Backr.AppImage\n'
   else
     printf '  Host dashboard: skipped (--no-appimage). Use authorized_keys to add client pubkeys.\n'
   fi
