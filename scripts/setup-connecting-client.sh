@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Purpose: Prepare a Linux machine for Backr — by default installs deps, builds the desktop AppImage from this repo,
-#          registers it under ~/.local/share (launcher menu entry), and optionally walks through two setup questions plus terms for SSH keys.
+#          registers it under ~/.local/share (AppImage + .desktop + hicolor icons + menu DB refresh), and optionally walks through two setup questions plus terms for SSH keys.
 # Role: Distro-aware OS packages for Tauri (WebKitGTK, SSL, build tools), Node.js LTS,
 #       Rust via rustup (respecting src-tauri/Cargo.toml rust-version), OpenSSH client + rsync, git/curl;
 #       npm ci/npm install; optional projects dir + SSH key; npm run tauri:build + AppImage install unless --deps-only;
@@ -26,6 +26,7 @@
 #   --install-appimage             Same as default (explicit): build AppImage locally and install launcher entry.
 #   --install-appimage-build       Same as default (explicit).
 #   --appimage-url URL             Download this AppImage and add launcher entry only (no compile).
+#   --reinstall-launcher           Re-copy AppImage menu entry + icons + desktop DB (no full build). Use ~/.local/share/backr/Backr.AppImage or the last built .AppImage in this repo.
 #   --non-interactive              Skip questionnaire and abbreviated default next-steps (CI / pipes).
 #   -h, --help                     Show this text.
 #
@@ -48,6 +49,7 @@ SKIP_SSH_COPY_ID="${BACKR_NO_SSH_COPY_ID:-0}"
 # Exclusive setup goal: build (default) | deps | download — see set_setup_kind().
 SETUP_KIND=""
 APPIMAGE_URL_OVERRIDE=""
+REINSTALL_LAUNCHER=0
 # Optional backup SSH target for pubkey probe / bootstrap hints (see verify_pubkey_ssh_or_print_bootstrap_line).
 BACKUP_SSH_TARGET=""
 BACKR_NON_INTERACTIVE="${BACKR_NON_INTERACTIVE:-0}"
@@ -73,7 +75,7 @@ die() {
 }
 
 usage() {
-  sed -n '2,39p' "$0"
+  sed -n '2,40p' "$0"
 }
 
 #
@@ -141,6 +143,10 @@ parse_args() {
         [[ -n "$APPIMAGE_URL_OVERRIDE" ]] || die "--appimage-url needs a value"
         set_setup_kind download
         shift 2
+        ;;
+      --reinstall-launcher)
+        REINSTALL_LAUNCHER=1
+        shift
         ;;
       --non-interactive)
         BACKR_NON_INTERACTIVE=1
@@ -658,18 +664,46 @@ download_appimage_to_tempfile() {
 }
 
 #
-# Copies the repo icon into the user icon theme so Icon=com.backr.app resolves in launchers.
+# Copies Backr PNGs into ~/.local/share/icons/hicolor so Icon=com.backr.app resolves at common grid sizes.
+# External: gtk-update-icon-cache rebuilds the hicolor theme index when the tool exists.
 #
 install_backr_icon_to_user_theme() {
-  local src="$REPO_ROOT/src-tauri/icons/128x128.png"
-  local dest_dir="$HOME/.local/share/icons/hicolor/128x128/apps"
-  local dest="$dest_dir/com.backr.app.png"
-  [[ -f "$src" ]] || return 0
-  mkdir -p "$dest_dir"
-  cp -f "$src" "$dest"
-  # External: gtk-update-icon-cache refreshes hicolor index when available (non-fatal if missing).
+  local repo="$REPO_ROOT/src-tauri/icons"
+  [[ -d "$repo" ]] || return 0
+  local pair="" src="" dest=""
+  for pair in \
+    "32x32.png|32x32" \
+    "128x128.png|128x128" \
+    "icon.png|256x256"; do
+    src="${repo}/${pair%%|*}"
+    dest="${pair##*|}"
+    [[ -f "$src" ]] || continue
+    mkdir -p "$HOME/.local/share/icons/hicolor/${dest}/apps"
+    cp -f "$src" "$HOME/.local/share/icons/hicolor/${dest}/apps/com.backr.app.png"
+  done
   if command -v gtk-update-icon-cache &>/dev/null; then
     gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" &>/dev/null || true
+  fi
+}
+
+#
+# Inputs: path to a .desktop file under the user's applications dir.
+# Outputs: refreshes caches so GNOME/KDE/XDG pick up the new launcher (best-effort, non-fatal).
+# External: update-desktop-database indexes ~/.local/share/applications; kbuildsycoca* refreshes KDE Plasma menus.
+#
+refresh_application_launcher_caches() {
+  local apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  [[ -d "$apps_dir" ]] || return 0
+  if command -v update-desktop-database &>/dev/null; then
+    update-desktop-database "$apps_dir" &>/dev/null || true
+  fi
+  if command -v kbuildsycoca6 &>/dev/null; then
+    kbuildsycoca6 --noincremental &>/dev/null || true
+  elif command -v kbuildsycoca5 &>/dev/null; then
+    kbuildsycoca5 --noincremental &>/dev/null || true
+  fi
+  if command -v xdg-desktop-menu &>/dev/null; then
+    xdg-desktop-menu forceupdate &>/dev/null || true
   fi
 }
 
@@ -692,21 +726,24 @@ install_appimage_desktop_integration() {
   mkdir -p "$(dirname "$desktop")"
   cat >"$desktop" <<EOF
 [Desktop Entry]
+Version=1.5
 Type=Application
 Name=Backr
-Comment=Backr desktop backup client
+GenericName=Backup client
+Comment=Backr desktop backup client (rsync snapshots over SSH)
 Exec=${dest} %u
+TryExec=${dest}
 Icon=com.backr.app
 Terminal=false
-Categories=Utility;Archiving;
+Categories=Utility;Archiving;Network;
+Keywords=backup;rsync;snapshot;sync;Backr;ssh;
 StartupNotify=true
+StartupWMClass=com.backr.app
 EOF
-  # External: update-desktop-database indexes ~/.local applications for some desktop environments.
-  if command -v update-desktop-database &>/dev/null; then
-    update-desktop-database "$HOME/.local/share/applications" &>/dev/null || true
-  fi
+  chmod u+x "$desktop" || true
+  refresh_application_launcher_caches
   echo "Installed AppImage: ${dest}"
-  echo "Launcher entry: ${desktop}"
+  echo "Launcher entry: ${desktop} (open your app menu / Activities and search «Backr»)"
 }
 
 #
@@ -755,7 +792,8 @@ print_appimage_done() {
   cat <<EOF
 
 ── Backr AppImage installed ──
-  Menu / launcher: search for "Backr"
+  App menu / grid: open Activities (GNOME), the KDE launcher, or your panel app menu — search «Backr».
+  Note: store-style «App Center» catalogs (Snap/Flatpak/Shop) only list published packages; this install uses the standard Linux .desktop + icon theme so the app appears like any other user app.
   Binary:          ~/.local/share/backr/Backr.AppImage
 
 EOF
@@ -768,12 +806,17 @@ print_done() {
   Repo:        ${REPO_ROOT}
   Projects:    ${PROJECTS_DIR}
 
-Run the app:
+  NOTE: --deps-only was used — the Backr dashboard (AppImage) was NOT installed.
+  To build and install the app launcher, re-run without --deps-only (or pass --appimage-url URL).
+
+Run the app in dev mode:
   cd ${REPO_ROOT}
   npm run tauri:dev
 
-Release build:
-  npm run tauri:build
+Release build + install dashboard:
+  ./scripts/setup-connecting-client.sh   (no --deps-only)
+  # or, if you already have a built AppImage:
+  ./scripts/setup-connecting-client.sh --reinstall-launcher
 
 Backups — default trust bootstrap when you passed **--backup-host**: if pubkey SSH isn't ready yet, the script offers **ssh-copy-id** (you type the SSH password **once** at the prompt — not stored here). **--yes-ssh-copy-id** skips the confirmation. **--ssh-port** / **BACKR_SSH_PORT** set the port when sshd is not on 22. If that isn't possible, use Backr on the backup machine → **Trust keys** (#/host/trust) or **authorized_keys**. Set **BACKR_NO_SSH_COPY_ID=1** or **--no-ssh-copy-id** to skip the offer. Re-run with **--backup-host HOST** to verify SSH after trust.
 
@@ -910,9 +953,34 @@ Then retry from here:
 EOF
 }
 
+#
+# Inputs: none (uses REPO_ROOT and $HOME). Outputs: re-runs desktop integration for an existing AppImage.
+# External: install_appimage_desktop_integration copies binary and refreshes FreeDesktop caches (see refresh_application_launcher_caches).
+#
+reinstall_backr_launcher_only() {
+  local img=""
+  if [[ -f "$HOME/.local/share/backr/Backr.AppImage" ]]; then
+    img="$HOME/.local/share/backr/Backr.AppImage"
+  else
+    img="$(find "$REPO_ROOT/src-tauri/target/release/bundle" -type f -name '*.AppImage' 2>/dev/null | head -n1 || true)"
+  fi
+  [[ -n "$img" ]] && [[ -f "$img" ]] ||
+    die "No AppImage found at ~/.local/share/backr/Backr.AppImage and none under src-tauri/target/release/bundle — run a full install/build first"
+  echo "Re-installing launcher integration using: ${img}"
+  install_appimage_desktop_integration "$img"
+  print_appimage_done
+  echo "Still missing from the menu? Log out and back in (or reboot). If you originally ran setup with sudo, the app may be under /root/.local — re-run this script without sudo."
+}
+
 main() {
   parse_args "$@"
   require_linux
+
+  if [[ "${REINSTALL_LAUNCHER:-0}" -eq 1 ]]; then
+    [[ -z "${SETUP_KIND:-}" ]] || die "use --reinstall-launcher without --deps-only or --appimage-url"
+    reinstall_backr_launcher_only
+    exit 0
+  fi
 
   if [[ -z "${CLI_SSH_PORT:-}" ]] && [[ -n "${BACKR_SSH_PORT:-}" ]]; then
     CLI_SSH_PORT="$BACKR_SSH_PORT"

@@ -1,6 +1,7 @@
 <!--
   Purpose: Read-only dashboard when Backr runs on the backup machine (`host_dashboard.toml`).
   Role: Lists local snapshot folders plus coarse disk stats (`df`) and optional backup-tree sizes (`du`) via IPC.
+        Shows HostSetupGuide in place of the empty state until the first backup snapshot arrives.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
@@ -15,6 +16,7 @@
     HostVolumeSummary,
   } from "../../types/hostDashboard";
   import { hostDashboardRoot, hostSshUser } from "../../stores/shell";
+  import HostSetupGuide from "./HostSetupGuide.svelte";
   import { relativeFromIso } from "../../lib/time";
 
   /** Minimum percent free space before showing a low-volume warning (whole-filesystem `df` semantics). */
@@ -348,11 +350,8 @@
     {/if}
 
     {#if sortedRows.length === 0 && !loadErr}
-      <div
-        class="rounded-[8px] border border-dashed border-[var(--border2)] px-4 py-8 text-center text-[13px] text-[var(--muted)]"
-      >
-        No project folders yet — backups from your laptop will appear as subdirectories here.
-      </div>
+      <!-- Show the setup guide until the first backup snapshot arrives. -->
+      <HostSetupGuide projectCount={rows.length} />
     {:else}
       <div class="flex flex-col gap-3">
         {#each sortedRows as row}
