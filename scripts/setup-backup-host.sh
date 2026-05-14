@@ -945,8 +945,13 @@ install_host_app_from_appimage_url() {
     return 0
   fi
 
-  tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL")" ||
-    die "failed to download Backr AppImage from ${HOST_APPIMAGE_URL}"
+  if ! tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL")"; then
+    echo "warning: could not download Backr AppImage from ${HOST_APPIMAGE_URL}" >&2
+    echo "  The rest of host setup completed. Install the app manually later:" >&2
+    echo "  curl -fL -o ~/.local/share/backr/Backr.AppImage ${HOST_APPIMAGE_URL}" >&2
+    SKIP_HOST_APPIMAGE=1
+    return 1
+  fi
   trap 'rm -f "$tmp"' RETURN
   install_host_appimage_desktop_integration "$tmp" "$target_user" "$target_home"
 }
@@ -969,22 +974,34 @@ launch_host_dashboard_app() {
 
   xdg_runtime="/run/user/${target_uid}"
 
-  # Build the display environment: prefer Wayland, fall back to X11.
+  # Standard systemd D-Bus socket path — needed to spawn GUI apps from a root process.
+  local dbus_addr="unix:path=${xdg_runtime}/bus"
+
+  # Build the display environment: prefer Wayland (any wayland-* socket), fall back to X11.
+  # Hyprland and some other compositors use wayland-1 rather than wayland-0.
   local display_args=()
-  if [[ -S "${xdg_runtime}/wayland-0" ]]; then
+  local wayland_sock=""
+  for sock in "${xdg_runtime}"/wayland-*; do
+    [[ -S "$sock" ]] && { wayland_sock="${sock##*/}"; break; }
+  done
+
+  if [[ -n "$wayland_sock" ]]; then
     display_args=(
-      "WAYLAND_DISPLAY=wayland-0"
+      "WAYLAND_DISPLAY=${wayland_sock}"
       "XDG_RUNTIME_DIR=${xdg_runtime}"
+      "DBUS_SESSION_BUS_ADDRESS=${dbus_addr}"
     )
   elif [[ -n "${DISPLAY:-}" ]]; then
     display_args=(
       "DISPLAY=${DISPLAY}"
       "XDG_RUNTIME_DIR=${xdg_runtime}"
+      "DBUS_SESSION_BUS_ADDRESS=${dbus_addr}"
     )
   elif [[ -S "/tmp/.X11-unix/X0" ]]; then
     display_args=(
       "DISPLAY=:0"
       "XDG_RUNTIME_DIR=${xdg_runtime}"
+      "DBUS_SESSION_BUS_ADDRESS=${dbus_addr}"
     )
   else
     echo "No graphical session detected for '${target_user}' — skipping auto-launch. Open Backr from the app menu when logged in."
@@ -1162,8 +1179,10 @@ main() {
   if [[ "${SKIP_HOST_APPIMAGE:-0}" != "1" ]]; then
     # --appimage-url / BACKR_HOST_APPIMAGE_URL overrides the default release URL.
     [[ -n "$HOST_APPIMAGE_URL" ]] || HOST_APPIMAGE_URL="$BACKR_DEFAULT_APPIMAGE_URL"
-    install_host_app_from_appimage_url
-    launch_host_dashboard_app
+    # Non-fatal: download failure prints a warning and sets SKIP_HOST_APPIMAGE=1.
+    if install_host_app_from_appimage_url; then
+      launch_host_dashboard_app
+    fi
   fi
 
   verify_backup_host_ready
