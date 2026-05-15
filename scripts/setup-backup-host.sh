@@ -825,7 +825,7 @@ install_host_tauri_system_deps() {
     pacman)
       pacman -Sy --noconfirm \
         base-devel curl wget git openssl mold \
-        webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg patchelf pkgconf cmake
+        webkit2gtk gtk3 libappindicator-gtk3 librsvg patchelf pkgconf cmake
       ;;
     zypper)
       zypper --non-interactive refresh
@@ -1125,25 +1125,24 @@ install_host_app_from_appimage_url() {
   local appimage_src=""
   local built_src_dir=""
 
-  # AppImages built on Debian/Ubuntu bundle EGL/Mesa stubs that are incompatible
-  # with Arch's newer Mesa stack, causing "Could not create default EGL display" crashes.
-  # On pacman-based distros, always build from source to get a native binary.
-  local _pkg_backend
-  _pkg_backend="$(detect_pkg_backend)"
-
-  if [[ "$_pkg_backend" != "pacman" ]]; then
-    # On non-Arch distros, try the pre-built AppImage first.
-    if tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL" 2>/dev/null)"; then
-      appimage_src="$tmp"
-      trap 'rm -f "$appimage_src"' RETURN
-    fi
-  else
-    echo "Arch-based system detected — building from source for native WebKitGTK compatibility …"
+  # Pre-built AppImages are compiled on Debian/Ubuntu and bundle EGL/Mesa stubs
+  # that are incompatible with Arch's newer Mesa stack (causes white screen / EGL_BAD_PARAMETER).
+  # On pacman-based systems, always build from source to use the native WebKitGTK + Mesa.
+  local backend
+  backend="$(detect_pkg_backend)"
+  local force_source=0
+  if [[ "$backend" == "pacman" ]]; then
+    echo "Arch-based system detected — building from source for WebKitGTK/Mesa compatibility …"
+    force_source=1
   fi
 
-  # If no pre-built AppImage (Arch, or download failed), build from source.
-  if [[ -z "$appimage_src" ]]; then
-    [[ "$_pkg_backend" != "pacman" ]] && echo "Pre-built AppImage not available — falling back to source build …"
+  if [[ "$force_source" -eq 0 ]] && tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL" 2>/dev/null)"; then
+    # Pre-built release available — use it directly.
+    appimage_src="$tmp"
+    trap 'rm -f "$appimage_src"' RETURN
+  else
+    [[ "$force_source" -eq 0 ]] && echo "Pre-built AppImage not available at ${HOST_APPIMAGE_URL} — falling back to source build …"
+    # build_host_appimage_from_source prints progress and echoes the AppImage path on the last line.
     local build_out
     build_out="$(build_host_appimage_from_source "$target_user" "$target_home")" || {
       echo "warning: source build failed — the launcher entry is installed but the binary is missing." >&2
@@ -1151,6 +1150,7 @@ install_host_app_from_appimage_url() {
       SKIP_HOST_APPIMAGE=1
       return 1
     }
+    # Last line of build output is the AppImage path; the containing dir is the temp src dir.
     appimage_src="$(echo "$build_out" | tail -1)"
     built_src_dir="$(dirname "$(dirname "$(dirname "$(dirname "$appimage_src")")")")"
     trap 'rm -rf "$built_src_dir"' RETURN
