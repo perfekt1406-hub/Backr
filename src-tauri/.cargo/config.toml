@@ -4,12 +4,13 @@
 # time and eliminates the CPU spike that saturates all cores during linking.
 
 [target.x86_64-unknown-linux-gnu]
-# Use mold when available; falls back to the system linker if mold is absent.
-# Install: sudo apt install mold  (Debian/Ubuntu)
-#          sudo pacman -S mold     (Arch)
-#          sudo dnf install mold   (Fedora)
-linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# Use mold when available for faster linking; otherwise falls back to default ld.
+# Install: sudo apt install mold clang  (Debian/Ubuntu)
+#          sudo pacman -S mold clang    (Arch)
+#          sudo dnf install mold clang  (Fedora)
+# Uncomment the next two lines if mold + clang are installed:
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
 [profile.release]
 # Split compilation across all available codegen units instead of serialising
