@@ -28,6 +28,23 @@ use tauri::WindowEvent;
 /// Panics when the Tauri event loop fails to start (fatal for desktop shells).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must run before tauri::Builder — applies WebKitGTK rendering workarounds
+    // on NVIDIA systems. We set BOTH env vars regardless of session type:
+    //   WEBKIT_DISABLE_DMABUF_RENDERER=1 — prevents blank/white windows
+    //   __NV_DISABLE_EXPLICIT_SYNC=1     — prevents Wayland render failure
+    // Detection: check nvidia kernel module (/sys/module/nvidia) OR primary GPU vendor.
+    // The module check catches hybrid GPU laptops where AMD/Intel is the boot GPU
+    // but the proprietary nvidia driver is loaded and affects WebKitGTK rendering.
+    #[cfg(target_os = "linux")]
+    {
+        let nvidia_present = webkit2gtk_nvidia_quirk::is_primary_gpu_nvidia()
+            || std::path::Path::new("/sys/module/nvidia").exists();
+        if nvidia_present {
+            webkit2gtk_nvidia_quirk::set_webkit_disable_dmabuf_renderer();
+            webkit2gtk_nvidia_quirk::nv_disable_explicit_sync();
+        }
+    }
+
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();

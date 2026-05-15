@@ -1027,7 +1027,7 @@ Type=Application
 Name=Backr (Host Dashboard)
 GenericName=Backup host dashboard
 Comment=Backr host-dashboard — inspect backups and trust client keys (rsync over SSH)
-Exec=env BACKR_HOST_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 ${dest} %u
+Exec=env BACKR_HOST_MODE=1 ${dest} %u
 Icon=com.backr.app
 Terminal=false
 Categories=Utility;Archiving;Network;
@@ -1165,7 +1165,6 @@ launch_host_dashboard_app() {
   runuser -u "$target_user" -- env \
     "${display_args[@]}" \
     BACKR_HOST_MODE=1 \
-    WEBKIT_DISABLE_DMABUF_RENDERER=1 \
     "$dest" &>/dev/null &
   disown $! 2>/dev/null || true
   echo "Backr host dashboard launched (it may take a moment to appear)."
