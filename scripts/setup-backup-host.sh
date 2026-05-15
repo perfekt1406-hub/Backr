@@ -811,20 +811,20 @@ install_host_tauri_system_deps() {
     apt)
       apt-get update -qq
       apt-get install -y \
-        build-essential pkg-config cmake curl wget git \
+        build-essential pkg-config cmake mold curl wget git \
         libwebkit2gtk-4.1-dev libssl-dev \
         libayatana-appindicator3-dev librsvg2-dev \
         libxdo-dev file
       ;;
     dnf)
       dnf install -y \
-        curl wget git openssl-devel gcc gcc-c++ make cmake pkgconf-pkg-config \
+        curl wget git openssl-devel mold gcc gcc-c++ make cmake pkgconf-pkg-config \
         webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel \
         perl-File-MimeInfo patch
       ;;
     pacman)
       pacman -Sy --noconfirm \
-        base-devel curl wget git openssl \
+        base-devel curl wget git openssl mold \
         webkit2gtk gtk3 libappindicator-gtk3 librsvg patchelf pkgconf cmake
       ;;
     zypper)

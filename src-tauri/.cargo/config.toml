@@ -1,0 +1,22 @@
+# Cargo build configuration for Backr.
+# Purpose: Speed up incremental and release builds by using the mold linker
+# and enabling codegen parallelism. Mold is 5-10x faster than GNU ld at link
+# time and eliminates the CPU spike that saturates all cores during linking.
+
+[target.x86_64-unknown-linux-gnu]
+# Use mold when available; falls back to the system linker if mold is absent.
+# Install: sudo apt install mold  (Debian/Ubuntu)
+#          sudo pacman -S mold     (Arch)
+#          sudo dnf install mold   (Fedora)
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[profile.release]
+# Split compilation across all available codegen units instead of serialising
+# into 1. Slightly larger binary but dramatically faster compile + link times.
+codegen-units = 16
+# Keep incremental on for release so only changed crates are recompiled.
+incremental = true
+# lto = false is the default; keep it off — thin/fat LTO is the biggest cause
+# of slow link times and is not worth it for a desktop app.
+lto = false

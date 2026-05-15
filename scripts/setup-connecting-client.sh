@@ -531,14 +531,14 @@ install_connecting_os_packages() {
       run_privileged apt-get install -y \
         ca-certificates curl wget git gnupg \
         openssh-client rsync \
-        build-essential pkg-config cmake \
+        build-essential pkg-config cmake mold \
         libwebkit2gtk-4.1-dev libssl-dev \
         libayatana-appindicator3-dev librsvg2-dev \
         libxdo-dev file
       ;;
     dnf)
       run_privileged dnf install -y \
-        curl wget git openssl-devel \
+        curl wget git openssl-devel mold \
         openssh-clients rsync \
         webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel \
         gcc gcc-c++ make cmake pkgconf-pkg-config perl-File-MimeInfo patch
@@ -553,7 +553,7 @@ install_connecting_os_packages() {
       ;;
     pacman)
       run_privileged pacman -Sy --noconfirm \
-        base-devel curl wget git openssl \
+        base-devel curl wget git openssl mold \
         webkit2gtk gtk3 libappindicator-gtk3 librsvg libvips patchelf pkgconf cmake \
         openssh rsync nodejs npm
       ;;
