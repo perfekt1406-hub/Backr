@@ -858,7 +858,7 @@ install_host_tauri_system_deps() {
 build_host_appimage_from_source() {
   local target_user="$1" target_home="$2"
 
-  echo "No pre-built AppImage available — building Backr from source (this takes ~10-20 min on first run) …"
+  echo "Building Backr from source (this takes ~10-20 min on first run) …"
 
   # Install system-level Tauri build deps (requires root, already running as root).
   install_host_tauri_system_deps
@@ -885,7 +885,7 @@ build_host_appimage_from_source() {
   # Hand ownership to the target user so Rust/npm write into their home.
   chown -R "${target_user}:${target_user}" "$src_dir"
 
-  # Install Rust + build the AppImage as the target user.
+  # Install Rust + build as the target user.
   # runuser executes a bash subshell that handles ~/.cargo/env sourcing internally.
   runuser -u "$target_user" -- bash -s <<USERSCRIPT
 set -euo pipefail
@@ -906,11 +906,31 @@ echo "Rust: \$(rustc --version)"
 cd "$src_dir"
 echo "Installing npm deps …"
 npm ci
-echo "Building AppImage (Rust compile — please wait) …"
-npm run tauri:build
+echo "Building Backr (Rust compile — please wait) …"
+npm run build
+cd src-tauri
+cargo build --release
 USERSCRIPT
 
-  # Find the produced AppImage.
+  # On Arch/pacman systems, use the raw binary (no AppImage wrapper) to avoid
+  # EGL/Mesa conflicts caused by linuxdeploy's LD_LIBRARY_PATH manipulation.
+  local backend
+  backend="$(detect_pkg_backend)"
+  if [[ "$backend" == "pacman" ]]; then
+    local raw_binary="${src_dir}/src-tauri/target/release/backr"
+    if [[ -f "$raw_binary" ]]; then
+      echo "Build complete (native binary): ${raw_binary}"
+      echo "NATIVE:${raw_binary}"
+      return 0
+    fi
+  fi
+
+  # On other distros, use the AppImage as before.
+  # Build the AppImage bundle (frontend already compiled above).
+  runuser -u "$target_user" -- bash -c "
+    source \"\$HOME/.cargo/env\" 2>/dev/null || true
+    cd \"$src_dir\" && npm run tauri:build
+  "
   local appimage
   appimage="$(find "$src_dir/src-tauri/target/release/bundle/appimage" -name "*.AppImage" 2>/dev/null | head -1)"
   if [[ -z "$appimage" ]]; then
@@ -1023,7 +1043,15 @@ refresh_host_application_launcher_caches() {
 install_host_desktop_entry() {
   local target_user="$1" target_home="$2"
   local dest_dir="${target_home}/.local/share/backr"
-  local dest="${dest_dir}/Backr.AppImage"
+  # Use raw binary on Arch (avoids AppImage LD_LIBRARY_PATH / EGL issues).
+  local dest
+  local backend
+  backend="$(detect_pkg_backend)"
+  if [[ "$backend" == "pacman" ]]; then
+    dest="${dest_dir}/backr"
+  else
+    dest="${dest_dir}/Backr.AppImage"
+  fi
   local desktop_dir="${target_home}/.local/share/applications"
   local desktop="${desktop_dir}/com.backr.app.desktop"
 
@@ -1142,16 +1170,38 @@ install_host_app_from_appimage_url() {
     trap 'rm -f "$appimage_src"' RETURN
   else
     [[ "$force_source" -eq 0 ]] && echo "Pre-built AppImage not available at ${HOST_APPIMAGE_URL} — falling back to source build …"
-    # build_host_appimage_from_source prints progress and echoes the AppImage path on the last line.
+    # build_host_appimage_from_source prints progress and echoes the path on the last line.
+    # On Arch it returns NATIVE:/path/to/binary instead of an AppImage path.
     local build_out
     build_out="$(build_host_appimage_from_source "$target_user" "$target_home")" || {
       echo "warning: source build failed — the launcher entry is installed but the binary is missing." >&2
-      echo "  Re-run this script or build manually: cd /path/to/Backr && npm ci && npm run tauri:build" >&2
+      echo "  Re-run this script or build manually: cd /path/to/Backr && npm ci && cargo build --release" >&2
       SKIP_HOST_APPIMAGE=1
       return 1
     }
-    # Last line of build output is the AppImage path; the containing dir is the temp src dir.
-    appimage_src="$(echo "$build_out" | tail -1)"
+    local last_line
+    last_line="$(echo "$build_out" | tail -1)"
+
+    if [[ "$last_line" == NATIVE:* ]]; then
+      # Arch: install raw binary (no AppImage wrapper to avoid EGL/Mesa conflicts).
+      local native_bin="${last_line#NATIVE:}"
+      local dest_dir="${target_home}/.local/share/backr"
+      local dest="${dest_dir}/backr"
+      mkdir -p "$dest_dir"
+      install -m 755 -o "$target_user" -g "$target_user" "$native_bin" "$dest"
+      # Rewrite the .desktop entry to point at the raw binary (not an AppImage).
+      local desktop="${target_home}/.local/share/applications/com.backr.app.desktop"
+      sed -i "s|^Exec=.*|Exec=env BACKR_HOST_MODE=1 ${dest} %u|" "$desktop"
+      echo "Installed native binary: ${dest}"
+      # Clean up temp source dir.
+      local src_parent
+      src_parent="$(dirname "$(dirname "$native_bin")")"
+      src_parent="$(dirname "$(dirname "$src_parent")")"
+      rm -rf "$src_parent" 2>/dev/null || true
+      return 0
+    fi
+
+    appimage_src="$last_line"
     built_src_dir="$(dirname "$(dirname "$(dirname "$(dirname "$appimage_src")")")")"
     trap 'rm -rf "$built_src_dir"' RETURN
   fi
@@ -1172,8 +1222,12 @@ launch_host_dashboard_app() {
   target_user="$(detect_desktop_user 2>/dev/null)" || return 0
   target_home="$(getent passwd "$target_user" | cut -d: -f6)"
   target_uid="$(id -u "$target_user" 2>/dev/null)" || return 0
-  dest="${target_home}/.local/share/backr/Backr.AppImage"
-  [[ -f "$dest" ]] || { echo "warning: AppImage not found at ${dest} — skipping auto-launch" >&2; return 0; }
+  # Check for native binary first (Arch), then AppImage.
+  dest="${target_home}/.local/share/backr/backr"
+  if [[ ! -f "$dest" ]]; then
+    dest="${target_home}/.local/share/backr/Backr.AppImage"
+  fi
+  [[ -f "$dest" ]] || { echo "warning: Backr binary not found — skipping auto-launch" >&2; return 0; }
 
   xdg_runtime="/run/user/${target_uid}"
 
