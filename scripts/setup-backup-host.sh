@@ -948,30 +948,43 @@ download_appimage_to_tempfile() {
 #
 install_host_backr_icon_to_user_theme() {
   local target_user="$1" target_home="$2"
-  # Icons shipped alongside this script in the repo's src-tauri/icons directory.
+
+  # Locate icons: prefer local repo checkout; fall back to downloading from raw GitHub.
   local script_dir=""
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || script_dir=""
   local repo_icons="${script_dir}/../src-tauri/icons"
+  local use_remote=0
+  [[ -d "$repo_icons" ]] || use_remote=1
 
-  [[ -d "$repo_icons" ]] || return 0
+  local raw_base="${BACKR_SCRIPTS_RAW_BASE%/scripts}"
 
-  local pair="" src="" dest_size="" icon_dir=""
+  local pair="" src="" dest_size="" icon_dir="" tmp_icon=""
   for pair in \
     "32x32.png|32x32" \
     "128x128.png|128x128" \
     "icon.png|256x256"; do
-    src="${repo_icons}/${pair%%|*}"
     dest_size="${pair##*|}"
-    [[ -f "$src" ]] || continue
     icon_dir="${target_home}/.local/share/icons/hicolor/${dest_size}/apps"
     mkdir -p "$icon_dir"
-    install -m 644 -o "$target_user" -g "$target_user" "$src" \
-      "${icon_dir}/com.backr.app.png"
+
+    if [[ "$use_remote" -eq 0 ]]; then
+      src="${repo_icons}/${pair%%|*}"
+      [[ -f "$src" ]] || continue
+      install -m 644 -o "$target_user" -g "$target_user" "$src" \
+        "${icon_dir}/com.backr.app.png"
+    else
+      # Download icon from raw GitHub when running piped from curl.
+      tmp_icon="$(mktemp /tmp/backr-icon.XXXXXX.png)"
+      if curl -fsSL "${raw_base}/src-tauri/icons/${pair%%|*}" -o "$tmp_icon" 2>/dev/null; then
+        install -m 644 -o "$target_user" -g "$target_user" "$tmp_icon" \
+          "${icon_dir}/com.backr.app.png"
+      fi
+      rm -f "$tmp_icon"
+    fi
   done
 
   if command -v gtk-update-icon-cache &>/dev/null; then
     local hicolor="${target_home}/.local/share/icons/hicolor"
-    # External: gtk-update-icon-cache rebuilds the hicolor theme index (non-fatal).
     gtk-update-icon-cache -f -t "$hicolor" &>/dev/null || true
   fi
 }
