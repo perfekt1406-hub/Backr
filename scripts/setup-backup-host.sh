@@ -1164,44 +1164,87 @@ install_host_app_from_appimage_url() {
     force_source=1
   fi
 
-  if [[ "$force_source" -eq 0 ]] && tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL" 2>/dev/null)"; then
-    # Pre-built release available — use it directly.
-    appimage_src="$tmp"
-    trap 'rm -f "$appimage_src"' RETURN
-  else
-    [[ "$force_source" -eq 0 ]] && echo "Pre-built AppImage not available at ${HOST_APPIMAGE_URL} — falling back to source build …"
-    # build_host_appimage_from_source prints progress and echoes the path on the last line.
-    # On Arch it returns NATIVE:/path/to/binary instead of an AppImage path.
-    local build_out
-    build_out="$(build_host_appimage_from_source "$target_user" "$target_home")" || {
-      echo "warning: source build failed — the launcher entry is installed but the binary is missing." >&2
-      echo "  Re-run this script or build manually: cd /path/to/Backr && npm ci && cargo build --release" >&2
+  # On Arch: clone, build native binary, install directly (no AppImage wrapper).
+  if [[ "$force_source" -eq 1 ]]; then
+    local src_dir dest_dir dest
+    src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
+    dest_dir="${target_home}/.local/share/backr"
+    dest="${dest_dir}/backr"
+
+    install_host_tauri_system_deps
+
+    if ! command -v node &>/dev/null; then
+      ensure_nodejs_for_host_survey
+    fi
+
+    local tarball_url="${BACKR_SCRIPTS_RAW_BASE%/scripts}/archive/refs/heads/main.tar.gz"
+    echo "Downloading Backr source …"
+    if ! curl -fsSL "$tarball_url" | tar -xz -C "$src_dir" --strip-components=1; then
+      rm -rf "$src_dir"
+      echo "error: failed to download source from ${tarball_url}" >&2
+      SKIP_HOST_APPIMAGE=1
+      return 1
+    fi
+
+    chown -R "${target_user}:${target_user}" "$src_dir"
+
+    echo "Building Backr from source (this takes a few minutes) …"
+    runuser -u "$target_user" -- bash -c "
+      export CARGO_HOME=\"\${CARGO_HOME:-\$HOME/.cargo}\"
+      export RUSTUP_HOME=\"\${RUSTUP_HOME:-\$HOME/.rustup}\"
+      export PATH=\"\$CARGO_HOME/bin:\$PATH\"
+      if ! command -v cargo &>/dev/null; then
+        echo 'Installing Rust toolchain …'
+        curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+      fi
+      [[ -f \"\$HOME/.cargo/env\" ]] && source \"\$HOME/.cargo/env\"
+      cd '$src_dir'
+      npm ci
+      npm run build
+      cd src-tauri
+      cargo build --release
+    " || {
+      echo "error: source build failed." >&2
+      rm -rf "$src_dir"
       SKIP_HOST_APPIMAGE=1
       return 1
     }
-    local last_line
-    last_line="$(echo "$build_out" | tail -1)"
 
-    if [[ "$last_line" == NATIVE:* ]]; then
-      # Arch: install raw binary (no AppImage wrapper to avoid EGL/Mesa conflicts).
-      local native_bin="${last_line#NATIVE:}"
-      local dest_dir="${target_home}/.local/share/backr"
-      local dest="${dest_dir}/backr"
-      mkdir -p "$dest_dir"
-      install -m 755 -o "$target_user" -g "$target_user" "$native_bin" "$dest"
-      # Rewrite the .desktop entry to point at the raw binary (not an AppImage).
-      local desktop="${target_home}/.local/share/applications/com.backr.app.desktop"
-      sed -i "s|^Exec=.*|Exec=env BACKR_HOST_MODE=1 ${dest} %u|" "$desktop"
-      echo "Installed native binary: ${dest}"
-      # Clean up temp source dir.
-      local src_parent
-      src_parent="$(dirname "$(dirname "$native_bin")")"
-      src_parent="$(dirname "$(dirname "$src_parent")")"
-      rm -rf "$src_parent" 2>/dev/null || true
-      return 0
+    local built_bin="${src_dir}/src-tauri/target/release/backr"
+    if [[ ! -f "$built_bin" ]]; then
+      echo "error: build completed but binary not found at ${built_bin}" >&2
+      rm -rf "$src_dir"
+      SKIP_HOST_APPIMAGE=1
+      return 1
     fi
 
-    appimage_src="$last_line"
+    mkdir -p "$dest_dir"
+    install -m 755 -o "$target_user" -g "$target_user" "$built_bin" "$dest"
+    echo "Installed native binary: ${dest}"
+
+    # Update .desktop Exec line to point at native binary.
+    local desktop="${target_home}/.local/share/applications/com.backr.app.desktop"
+    if [[ -f "$desktop" ]]; then
+      sed -i "s|^Exec=.*|Exec=env BACKR_HOST_MODE=1 ${dest} %u|" "$desktop"
+    fi
+
+    rm -rf "$src_dir"
+    return 0
+  fi
+
+  # Non-Arch: download pre-built AppImage.
+  if tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL" 2>/dev/null)"; then
+    appimage_src="$tmp"
+    trap 'rm -f "$appimage_src"' RETURN
+  else
+    echo "Pre-built AppImage not available at ${HOST_APPIMAGE_URL} — falling back to source build …"
+    local build_out
+    build_out="$(build_host_appimage_from_source "$target_user" "$target_home")" || {
+      echo "warning: source build failed — the launcher entry is installed but the binary is missing." >&2
+      SKIP_HOST_APPIMAGE=1
+      return 1
+    }
+    appimage_src="$(echo "$build_out" | tail -1)"
     built_src_dir="$(dirname "$(dirname "$(dirname "$(dirname "$appimage_src")")")")"
     trap 'rm -rf "$built_src_dir"' RETURN
   fi
