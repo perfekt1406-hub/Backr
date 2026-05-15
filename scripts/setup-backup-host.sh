@@ -1076,6 +1076,30 @@ install_host_appimage_binary() {
 #          the URL is reachable. Download failure is non-fatal — a manual recovery command
 #          is printed and setup continues.
 #
+install_host_appimage_runtime_deps() {
+  local backend
+  backend="$(detect_pkg_backend)"
+  echo "Ensuring WebKitGTK runtime dependencies for Backr AppImage (${backend}) …"
+  case "$backend" in
+    apt)
+      apt-get update -qq
+      apt-get install -y libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 libfuse2 2>/dev/null || true
+      ;;
+    dnf)
+      dnf install -y webkit2gtk4.1 libappindicator-gtk3 librsvg2 fuse-libs 2>/dev/null || true
+      ;;
+    pacman)
+      pacman -Sy --noconfirm webkit2gtk-4.1 libappindicator-gtk3 librsvg fuse2 2>/dev/null || true
+      ;;
+    zypper)
+      zypper --non-interactive install webkit2gtk-4_1 libappindicator3-1 librsvg-2 libfuse2 2>/dev/null || true
+      ;;
+    *)
+      echo "  ⚠ Unknown package manager — ensure webkit2gtk-4.1 is installed manually."
+      ;;
+  esac
+}
+
 install_host_app_from_appimage_url() {
   [[ -n "$HOST_APPIMAGE_URL" ]] || die "internal: install_host_app_from_appimage_url called without a URL"
 
@@ -1091,6 +1115,9 @@ install_host_app_from_appimage_url() {
     echo "[dry-run] install AppImage + .desktop for ${target_user} at ${target_home}"
     return 0
   fi
+
+  # WebKitGTK is required at runtime but not bundled in the AppImage.
+  install_host_appimage_runtime_deps
 
   # Always write the .desktop entry so the app appears in the launcher immediately.
   install_host_desktop_entry "$target_user" "$target_home"
