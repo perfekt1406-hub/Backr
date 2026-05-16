@@ -1061,6 +1061,8 @@ install_host_desktop_entry() {
   # TryExec is intentionally omitted — some launchers hide entries whose TryExec binary
   # is missing. Omitting it means the entry always appears; clicking it before the
   # AppImage is downloaded will simply do nothing.
+  # WEBKIT_DISABLE_DMABUF_RENDERER=1 prevents white/blank windows on Wayland
+  # (WebKitGTK DMA-BUF framebuffer failures on rolling-release Mesa).
   cat >"$desktop" <<EOF
 [Desktop Entry]
 Version=1.5
@@ -1068,7 +1070,7 @@ Type=Application
 Name=Backr (Host Dashboard)
 GenericName=Backup host dashboard
 Comment=Backr host-dashboard — inspect backups and trust client keys (rsync over SSH)
-Exec=env BACKR_HOST_MODE=1 ${dest} %u
+Exec=env BACKR_HOST_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 ${dest} %u
 Icon=com.backr.app
 Terminal=false
 Categories=Utility;Archiving;Network;
@@ -1274,8 +1276,13 @@ launch_host_dashboard_app() {
 
   xdg_runtime="/run/user/${target_uid}"
 
-  # Standard systemd D-Bus socket path — needed to spawn GUI apps from a root process.
-  local dbus_addr="unix:path=${xdg_runtime}/bus"
+  # D-Bus address: try the user's actual session bus first (avoids assuming the
+  # socket lives at the systemd default path, which varies across session managers).
+  local dbus_addr=""
+  local dbus_sock="${xdg_runtime}/bus"
+  if [[ -S "$dbus_sock" ]]; then
+    dbus_addr="unix:path=${dbus_sock}"
+  fi
 
   # Build the display environment: prefer Wayland (any wayland-* socket), fall back to X11.
   # Hyprland and some other compositors use wayland-1 rather than wayland-0.
@@ -1285,23 +1292,33 @@ launch_host_dashboard_app() {
     [[ -S "$sock" ]] && { wayland_sock="${sock##*/}"; break; }
   done
 
+  # Common env vars needed by every graphical launch path.
+  # HOME is critical — runuser without -l inherits root's HOME, causing
+  # WebKitGTK profile/cache failures and silent crashes.
+  # WEBKIT_DISABLE_DMABUF_RENDERER prevents white/blank windows on Wayland
+  # (DMA-BUF framebuffer failures with rolling-release Mesa + WebKitGTK).
+  local common_args=(
+    "HOME=${target_home}"
+    "XDG_RUNTIME_DIR=${xdg_runtime}"
+    "WEBKIT_DISABLE_DMABUF_RENDERER=1"
+  )
+  [[ -n "$dbus_addr" ]] && common_args+=("DBUS_SESSION_BUS_ADDRESS=${dbus_addr}")
+
   if [[ -n "$wayland_sock" ]]; then
     display_args=(
+      "${common_args[@]}"
       "WAYLAND_DISPLAY=${wayland_sock}"
-      "XDG_RUNTIME_DIR=${xdg_runtime}"
-      "DBUS_SESSION_BUS_ADDRESS=${dbus_addr}"
+      "XDG_SESSION_TYPE=wayland"
     )
   elif [[ -n "${DISPLAY:-}" ]]; then
     display_args=(
+      "${common_args[@]}"
       "DISPLAY=${DISPLAY}"
-      "XDG_RUNTIME_DIR=${xdg_runtime}"
-      "DBUS_SESSION_BUS_ADDRESS=${dbus_addr}"
     )
   elif [[ -S "/tmp/.X11-unix/X0" ]]; then
     display_args=(
+      "${common_args[@]}"
       "DISPLAY=:0"
-      "XDG_RUNTIME_DIR=${xdg_runtime}"
-      "DBUS_SESSION_BUS_ADDRESS=${dbus_addr}"
     )
   else
     echo "No graphical session detected for '${target_user}' — skipping auto-launch. Open Backr from the app menu when logged in."
@@ -1309,7 +1326,7 @@ launch_host_dashboard_app() {
   fi
 
   echo "Launching Backr host dashboard for '${target_user}' …"
-  # External: runuser runs the AppImage as the desktop user; & disowns it so the script exits cleanly.
+  # External: runuser runs the binary as the desktop user; & disowns it so the script exits cleanly.
   runuser -u "$target_user" -- env \
     "${display_args[@]}" \
     BACKR_HOST_MODE=1 \

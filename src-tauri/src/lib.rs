@@ -28,19 +28,31 @@ use tauri::WindowEvent;
 /// Panics when the Tauri event loop fails to start (fatal for desktop shells).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Must run before tauri::Builder — applies WebKitGTK rendering workarounds
-    // on NVIDIA systems. We set BOTH env vars regardless of session type:
-    //   WEBKIT_DISABLE_DMABUF_RENDERER=1 — prevents blank/white windows
-    //   __NV_DISABLE_EXPLICIT_SYNC=1     — prevents Wayland render failure
-    // Detection: check nvidia kernel module (/sys/module/nvidia) OR primary GPU vendor.
-    // The module check catches hybrid GPU laptops where AMD/Intel is the boot GPU
-    // but the proprietary nvidia driver is loaded and affects WebKitGTK rendering.
+    // Must run before tauri::Builder — applies WebKitGTK rendering workarounds.
+    //
+    // WEBKIT_DISABLE_DMABUF_RENDERER=1 prevents blank/white windows caused by
+    // DMA-BUF framebuffer failures.  Originally NVIDIA-only, but the same symptom
+    // appears on AMD/Intel GPUs when WebKitGTK and Mesa versions drift apart —
+    // especially on rolling-release distros (Arch, Manjaro, CachyOS …).
+    //
+    // Setting the var unconditionally on Wayland is safe: the fallback renderer
+    // uses shared-memory buffers with no user-visible difference for a utility app.
+    // We still gate __NV_DISABLE_EXPLICIT_SYNC on actual NVIDIA presence.
     #[cfg(target_os = "linux")]
     {
+        let on_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
+            || std::env::var("XDG_SESSION_TYPE")
+                .map(|v| v == "wayland")
+                .unwrap_or(false);
+
+        // DMA-BUF workaround: always on Wayland, or when NVIDIA is detected on X11.
         let nvidia_present = webkit2gtk_nvidia_quirk::is_primary_gpu_nvidia()
             || std::path::Path::new("/sys/module/nvidia").exists();
-        if nvidia_present {
+        if on_wayland || nvidia_present {
             webkit2gtk_nvidia_quirk::set_webkit_disable_dmabuf_renderer();
+        }
+
+        if nvidia_present {
             webkit2gtk_nvidia_quirk::nv_disable_explicit_sync();
         }
     }
