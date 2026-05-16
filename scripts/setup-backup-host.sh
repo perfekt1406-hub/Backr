@@ -1183,17 +1183,10 @@ install_host_app_from_appimage_url() {
     dest_dir="${target_home}/.local/share/backr"
     dest="${dest_dir}/backr"
 
-    # Skip rebuild when a correctly-built binary already exists (re-run).
-    # A companion marker file (.tauri-built) is written after a successful
-    # 'tauri build' — earlier builds used raw 'cargo build' which produces
-    # a binary that passes ldd but has no embedded frontend assets.
-    local build_marker="${dest_dir}/.tauri-built"
-    if [[ -x "$dest" ]] && [[ -f "$build_marker" ]]; then
+    if [[ -x "$dest" ]]; then
       echo "Native binary already installed at ${dest} — skipping rebuild."
       return 0
     fi
-    # Remove stale binary from a previous broken build method.
-    [[ -f "$dest" ]] && rm -f "$dest"
 
     install_host_tauri_system_deps
 
@@ -1201,9 +1194,7 @@ install_host_app_from_appimage_url() {
       ensure_nodejs_for_host_survey
     fi
 
-    # Always build in a temp dir.  Using the live repo directly would require
-    # chown -R (breaks git for the original user) and pollutes the source tree
-    # with build artifacts.
+    # Build in a temp dir so we don't chown or pollute the live repo.
     local src_dir
     src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
 
@@ -1216,12 +1207,9 @@ install_host_app_from_appimage_url() {
       local repo_root
       repo_root="$(cd "${script_dir}/.." && pwd)"
       echo "Copying local repo source to build directory …"
-      # Copy source files only — exclude heavy dirs that would slow things down.
       rsync -a --exclude='node_modules' --exclude='.git' --exclude='target' \
         "${repo_root}/" "${src_dir}/"
     else
-      # BACKR_SCRIPTS_RAW_BASE uses raw.githubusercontent.com which cannot serve
-      # archives; derive the proper github.com archive URL from the repo slug.
       local repo_slug=""
       repo_slug="$(echo "$BACKR_SCRIPTS_RAW_BASE" | sed -n 's|.*githubusercontent\.com/\([^/]*/[^/]*\)/.*|\1|p')"
       [[ -n "$repo_slug" ]] || repo_slug="$(echo "$BACKR_SCRIPTS_RAW_BASE" | sed -n 's|.*github\.com/\([^/]*/[^/]*\)/.*|\1|p')"
@@ -1239,9 +1227,7 @@ install_host_app_from_appimage_url() {
     chown -R "${target_user}:${target_user}" "$src_dir"
 
     echo ""
-    echo "Building Backr from source …"
-    echo "  Step 1/2: npm ci (installing JS dependencies)"
-    echo "  Step 2/2: tauri build --no-bundle (frontend + Rust compile — 10-20 min on first run)"
+    echo "Building Backr from source (Rust compile takes 10-20 min on first run) …"
     echo ""
     runuser -u "$target_user" -- bash -c "
       export HOME='${target_home}'
@@ -1254,12 +1240,10 @@ install_host_app_from_appimage_url() {
       fi
       [[ -f \"\$HOME/.cargo/env\" ]] && source \"\$HOME/.cargo/env\"
       cd '$src_dir'
-      echo '── Step 1/2: npm ci ──'
       npm ci
-      echo '── Step 2/2: tauri build --no-bundle (frontend + Rust — 10-20 min on first run) ──'
-      mkdir -p \"\$HOME/.cache/tauri\"
-      npx tauri build --no-bundle
-      echo '── Build complete ──'
+      npm run build
+      cd src-tauri
+      cargo build --release
     " || {
       echo "error: source build failed." >&2
       rm -rf "$src_dir"
@@ -1277,11 +1261,25 @@ install_host_app_from_appimage_url() {
 
     mkdir -p "$dest_dir"
     install -m 755 -o "$target_user" -g "$target_user" "$built_bin" "$dest"
-    # Marker confirms this binary was built with 'tauri build' (frontend embedded).
-    touch "$build_marker"
-    chown "${target_user}:${target_user}" "$build_marker"
     echo "Installed native binary: ${dest}"
     rm -rf "$src_dir"
+
+    # Diagnostics — print binary info so we can debug launch failures.
+    echo ""
+    echo "── Binary diagnostics ──"
+    echo "  Path: ${dest}"
+    echo "  Size: $(du -h "$dest" 2>/dev/null | awk '{print $1}') (should be >10MB if frontend is embedded)"
+    echo "  Type: $(file "$dest" 2>/dev/null | sed "s|${dest}: ||")"
+    local missing_libs
+    missing_libs="$(ldd "$dest" 2>&1 | grep 'not found' || true)"
+    if [[ -n "$missing_libs" ]]; then
+      echo "  ⚠ Missing libraries:"
+      echo "$missing_libs" | sed 's/^/    /'
+    else
+      echo "  Libraries: all found"
+    fi
+    echo ""
+
     return 0
   fi
 
@@ -1393,12 +1391,19 @@ launch_host_dashboard_app() {
   disown "$launch_pid" 2>/dev/null || true
 
   # Give the process a moment to crash or start; report either way.
-  sleep 2
+  sleep 3
   if kill -0 "$launch_pid" 2>/dev/null; then
     echo "Backr host dashboard launched (PID ${launch_pid})."
   else
-    echo "warning: Backr process exited immediately — check ${launch_log} for details." >&2
-    tail -n 20 "$launch_log" 2>/dev/null | head -n 10 >&2 || true
+    echo ""
+    echo "── Auto-launch failed ──"
+    echo "The Backr process exited immediately.  Log (${launch_log}):"
+    echo ""
+    tail -n 30 "$launch_log" 2>/dev/null | sed 's/^/  /' || echo "  (empty log)"
+    echo ""
+    echo "To debug manually, run as your normal user (not root):"
+    echo "  WEBKIT_DISABLE_DMABUF_RENDERER=1 BACKR_HOST_MODE=1 ${dest}"
+    echo ""
   fi
 }
 
