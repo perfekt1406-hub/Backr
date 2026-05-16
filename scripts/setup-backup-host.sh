@@ -890,7 +890,9 @@ build_host_appimage_from_source() {
   chown -R "${target_user}:${target_user}" "$src_dir"
 
   # Install Rust + build as the target user.
-  # runuser executes a bash subshell that handles ~/.cargo/env sourcing internally.
+  # Uses 'npx tauri build' so the frontend is properly embedded in the binary.
+  # Raw 'cargo build' does NOT embed frontend assets — the app would try to
+  # connect to the dev server (localhost:1420) and fail.
   runuser -u "$target_user" -- bash -s <<USERSCRIPT
 set -euo pipefail
 export HOME="${target_home}"
@@ -898,7 +900,6 @@ export CARGO_HOME="\${CARGO_HOME:-\$HOME/.cargo}"
 export RUSTUP_HOME="\${RUSTUP_HOME:-\$HOME/.rustup}"
 export PATH="\$CARGO_HOME/bin:\$PATH"
 
-# Install Rust via rustup when cargo is missing.
 if ! command -v cargo &>/dev/null; then
   echo "Installing Rust toolchain …"
   curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | \
@@ -911,10 +912,8 @@ echo "Rust: \$(rustc --version)"
 cd "$src_dir"
 echo "Installing npm deps …"
 npm ci
-echo "Building Backr (Rust compile — please wait) …"
-npm run build
-cd src-tauri
-cargo build --release
+echo "Building Backr (tauri build — Rust compile takes 10-20 min on first run) …"
+npx tauri build
 USERSCRIPT
 
   # On Arch/pacman systems, use the raw binary (no AppImage wrapper) to avoid
@@ -930,12 +929,6 @@ USERSCRIPT
     fi
   fi
 
-  # On other distros, use the AppImage as before.
-  # Build the AppImage bundle (frontend already compiled above).
-  runuser -u "$target_user" -- bash -c "
-    source \"\$HOME/.cargo/env\" 2>/dev/null || true
-    cd \"$src_dir\" && npm run tauri:build
-  "
   local appimage
   appimage="$(find "$src_dir/src-tauri/target/release/bundle/appimage" -name "*.AppImage" 2>/dev/null | head -1)"
   if [[ -z "$appimage" ]]; then
@@ -1237,9 +1230,8 @@ install_host_app_from_appimage_url() {
 
     echo ""
     echo "Building Backr from source …"
-    echo "  Step 1/3: npm ci (installing JS dependencies)"
-    echo "  Step 2/3: npm run build (compiling frontend)"
-    echo "  Step 3/3: cargo build --release (compiling Rust — 10-20 min on first run)"
+    echo "  Step 1/2: npm ci (installing JS dependencies)"
+    echo "  Step 2/2: tauri build --no-bundle (frontend + Rust compile — 10-20 min on first run)"
     echo ""
     runuser -u "$target_user" -- bash -c "
       export HOME='${target_home}'
@@ -1252,13 +1244,11 @@ install_host_app_from_appimage_url() {
       fi
       [[ -f \"\$HOME/.cargo/env\" ]] && source \"\$HOME/.cargo/env\"
       cd '$src_dir'
-      echo '── Step 1/3: npm ci ──'
+      echo '── Step 1/2: npm ci ──'
       npm ci
-      echo '── Step 2/3: npm run build ──'
-      npm run build
-      echo '── Step 3/3: cargo build --release (this is the slow step) ──'
-      cd src-tauri
-      cargo build --release
+      echo '── Step 2/2: tauri build --no-bundle (frontend + Rust — 10-20 min on first run) ──'
+      mkdir -p \"\$HOME/.cache/tauri\"
+      npx tauri build --no-bundle
       echo '── Build complete ──'
     " || {
       echo "error: source build failed." >&2
@@ -1374,16 +1364,18 @@ launch_host_dashboard_app() {
   fi
 
   echo "Launching Backr host dashboard for '${target_user}' …"
-  # External: runuser runs the binary as the desktop user; & disowns it so the script exits cleanly.
   # Errors are logged to a file so launch failures can be diagnosed.
   local launch_log="${target_home}/.local/share/backr/launch.log"
   mkdir -p "$(dirname "$launch_log")"
-  runuser -u "$target_user" -- env \
+  # Close stdin (</dev/null), redirect stdout+stderr to log, background, and
+  # detach from process group via setsid so the script can exit cleanly.
+  # Without </dev/null the process inherits the script's /dev/tty fd (from
+  # the questionnaire's exec </dev/tty) and blocks the shell from exiting.
+  setsid runuser -u "$target_user" -- env \
     "${display_args[@]}" \
     BACKR_HOST_MODE=1 \
-    "$dest" >>"$launch_log" 2>&1 &
+    "$dest" </dev/null >>"$launch_log" 2>&1 &
   local launch_pid=$!
-  disown "$launch_pid" 2>/dev/null || true
 
   # Give the process a moment to crash or start; report either way.
   sleep 2
