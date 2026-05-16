@@ -825,7 +825,7 @@ install_host_tauri_system_deps() {
     pacman)
       pacman -Sy --noconfirm \
         base-devel curl wget git openssl mold \
-        webkit2gtk gtk3 libappindicator-gtk3 librsvg patchelf pkgconf cmake
+        webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg patchelf pkgconf cmake
       ;;
     zypper)
       zypper --non-interactive refresh
@@ -874,7 +874,11 @@ build_host_appimage_from_source() {
   # Download source tarball from GitHub.
   local src_dir
   src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
-  local tarball_url="${BACKR_SCRIPTS_RAW_BASE%/scripts}/archive/refs/heads/main.tar.gz"
+  local repo_slug=""
+  repo_slug="$(echo "$BACKR_SCRIPTS_RAW_BASE" | sed -n 's|.*githubusercontent\.com/\([^/]*/[^/]*\)/.*|\1|p')"
+  [[ -n "$repo_slug" ]] || repo_slug="$(echo "$BACKR_SCRIPTS_RAW_BASE" | sed -n 's|.*github\.com/\([^/]*/[^/]*\)/.*|\1|p')"
+  [[ -n "$repo_slug" ]] || repo_slug="perfekt1406-hub/Backr"
+  local tarball_url="https://github.com/${repo_slug}/archive/refs/heads/main.tar.gz"
   echo "Downloading source from ${tarball_url} …"
   if ! curl -fsSL "$tarball_url" | tar -xz -C "$src_dir" --strip-components=1; then
     rm -rf "$src_dir"
@@ -889,6 +893,7 @@ build_host_appimage_from_source() {
   # runuser executes a bash subshell that handles ~/.cargo/env sourcing internally.
   runuser -u "$target_user" -- bash -s <<USERSCRIPT
 set -euo pipefail
+export HOME="${target_home}"
 export CARGO_HOME="\${CARGO_HOME:-\$HOME/.cargo}"
 export RUSTUP_HOME="\${RUSTUP_HOME:-\$HOME/.rustup}"
 export PATH="\$CARGO_HOME/bin:\$PATH"
@@ -1166,12 +1171,19 @@ install_host_app_from_appimage_url() {
     force_source=1
   fi
 
-  # On Arch: clone, build native binary, install directly (no AppImage wrapper).
+  # On Arch: build native binary, install directly (no AppImage wrapper).
+  # AppImages bundle EGL/Mesa stubs compiled on Debian that conflict with
+  # Arch's rolling Mesa — a native build links against the system WebKitGTK.
   if [[ "$force_source" -eq 1 ]]; then
-    local src_dir dest_dir dest
-    src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
+    local dest_dir dest
     dest_dir="${target_home}/.local/share/backr"
     dest="${dest_dir}/backr"
+
+    # Skip rebuild when binary already exists (re-run of the script).
+    if [[ -x "$dest" ]]; then
+      echo "Native binary already installed at ${dest} — skipping rebuild."
+      return 0
+    fi
 
     install_host_tauri_system_deps
 
@@ -1179,19 +1191,39 @@ install_host_app_from_appimage_url() {
       ensure_nodejs_for_host_survey
     fi
 
-    local tarball_url="${BACKR_SCRIPTS_RAW_BASE%/scripts}/archive/refs/heads/main.tar.gz"
-    echo "Downloading Backr source …"
-    if ! curl -fsSL "$tarball_url" | tar -xz -C "$src_dir" --strip-components=1; then
-      rm -rf "$src_dir"
-      echo "error: failed to download source from ${tarball_url}" >&2
-      SKIP_HOST_APPIMAGE=1
-      return 1
+    # Resolve source tree: prefer local git clone, fall back to GitHub archive.
+    local src_dir="" src_is_temp=0
+    local script_dir=""
+    if [[ -n "${BASH_SOURCE[0]:-}" ]] && [[ -f "${BASH_SOURCE[0]}" ]] && [[ "${BASH_SOURCE[0]}" != /dev/* ]]; then
+      script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    fi
+    if [[ -n "$script_dir" ]] && [[ -f "${script_dir}/../src-tauri/Cargo.toml" ]]; then
+      src_dir="$(cd "${script_dir}/.." && pwd)"
+      echo "Using local repo source at ${src_dir}"
+    else
+      src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
+      src_is_temp=1
+      # BACKR_SCRIPTS_RAW_BASE uses raw.githubusercontent.com which cannot serve
+      # archives; derive the proper github.com archive URL from the repo slug.
+      local repo_slug=""
+      repo_slug="$(echo "$BACKR_SCRIPTS_RAW_BASE" | sed -n 's|.*githubusercontent\.com/\([^/]*/[^/]*\)/.*|\1|p')"
+      [[ -n "$repo_slug" ]] || repo_slug="$(echo "$BACKR_SCRIPTS_RAW_BASE" | sed -n 's|.*github\.com/\([^/]*/[^/]*\)/.*|\1|p')"
+      [[ -n "$repo_slug" ]] || repo_slug="perfekt1406-hub/Backr"
+      local tarball_url="https://github.com/${repo_slug}/archive/refs/heads/main.tar.gz"
+      echo "Downloading Backr source from ${tarball_url} …"
+      if ! curl -fsSL "$tarball_url" | tar -xz -C "$src_dir" --strip-components=1; then
+        rm -rf "$src_dir"
+        echo "error: failed to download source from ${tarball_url}" >&2
+        SKIP_HOST_APPIMAGE=1
+        return 1
+      fi
     fi
 
     chown -R "${target_user}:${target_user}" "$src_dir"
 
-    echo "Building Backr from source (this takes a few minutes) …"
+    echo "Building Backr from source (this takes a few minutes on first run) …"
     runuser -u "$target_user" -- bash -c "
+      export HOME='${target_home}'
       export CARGO_HOME=\"\${CARGO_HOME:-\$HOME/.cargo}\"
       export RUSTUP_HOME=\"\${RUSTUP_HOME:-\$HOME/.rustup}\"
       export PATH=\"\$CARGO_HOME/bin:\$PATH\"
@@ -1207,7 +1239,7 @@ install_host_app_from_appimage_url() {
       cargo build --release
     " || {
       echo "error: source build failed." >&2
-      rm -rf "$src_dir"
+      [[ "$src_is_temp" -eq 1 ]] && rm -rf "$src_dir"
       SKIP_HOST_APPIMAGE=1
       return 1
     }
@@ -1215,7 +1247,7 @@ install_host_app_from_appimage_url() {
     local built_bin="${src_dir}/src-tauri/target/release/backr"
     if [[ ! -f "$built_bin" ]]; then
       echo "error: build completed but binary not found at ${built_bin}" >&2
-      rm -rf "$src_dir"
+      [[ "$src_is_temp" -eq 1 ]] && rm -rf "$src_dir"
       SKIP_HOST_APPIMAGE=1
       return 1
     fi
@@ -1223,14 +1255,7 @@ install_host_app_from_appimage_url() {
     mkdir -p "$dest_dir"
     install -m 755 -o "$target_user" -g "$target_user" "$built_bin" "$dest"
     echo "Installed native binary: ${dest}"
-
-    # Update .desktop Exec line to point at native binary.
-    local desktop="${target_home}/.local/share/applications/com.backr.app.desktop"
-    if [[ -f "$desktop" ]]; then
-      sed -i "s|^Exec=.*|Exec=env BACKR_HOST_MODE=1 ${dest} %u|" "$desktop"
-    fi
-
-    rm -rf "$src_dir"
+    [[ "$src_is_temp" -eq 1 ]] && rm -rf "$src_dir"
     return 0
   fi
 
@@ -1327,12 +1352,24 @@ launch_host_dashboard_app() {
 
   echo "Launching Backr host dashboard for '${target_user}' …"
   # External: runuser runs the binary as the desktop user; & disowns it so the script exits cleanly.
+  # Errors are logged to a file so launch failures can be diagnosed.
+  local launch_log="${target_home}/.local/share/backr/launch.log"
+  mkdir -p "$(dirname "$launch_log")"
   runuser -u "$target_user" -- env \
     "${display_args[@]}" \
     BACKR_HOST_MODE=1 \
-    "$dest" &>/dev/null &
-  disown $! 2>/dev/null || true
-  echo "Backr host dashboard launched (it may take a moment to appear)."
+    "$dest" >>"$launch_log" 2>&1 &
+  local launch_pid=$!
+  disown "$launch_pid" 2>/dev/null || true
+
+  # Give the process a moment to crash or start; report either way.
+  sleep 2
+  if kill -0 "$launch_pid" 2>/dev/null; then
+    echo "Backr host dashboard launched (PID ${launch_pid})."
+  else
+    echo "warning: Backr process exited immediately — check ${launch_log} for details." >&2
+    tail -n 20 "$launch_log" 2>/dev/null | head -n 10 >&2 || true
+  fi
 }
 
 #
@@ -1453,11 +1490,12 @@ EOF
     printf '  Primary IP:     %s (run ip addr if this box has several interfaces)\n' "$ip_line"
   fi
   if [[ "${SKIP_HOST_APPIMAGE:-0}" != "1" ]]; then
-    local du=""
+    local du="" bin_name="Backr.AppImage"
     du="$(detect_desktop_user 2>/dev/null || echo '(desktop-user)')"
-    printf '  Host dashboard: ~/.local/share/backr/Backr.AppImage (installed for %s)\n' "$du"
+    [[ "$(detect_pkg_backend)" == "pacman" ]] && bin_name="backr"
+    printf '  Host dashboard: ~/.local/share/backr/%s (installed for %s)\n' "$bin_name" "$du"
     printf '                  → It should open automatically. If it did not, search «Backr» in\n'
-    printf '                    your app menu or run: ~/.local/share/backr/Backr.AppImage\n'
+    printf '                    your app menu or run: ~/.local/share/backr/%s\n' "$bin_name"
   else
     printf '  Host dashboard: skipped (--no-appimage). Use authorized_keys to add client pubkeys.\n'
   fi
