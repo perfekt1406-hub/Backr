@@ -215,9 +215,15 @@ run_backup_host_questionnaire() {
     return 0
   fi
 
-  # curl … | sudo bash leaves stdin on a pipe — attach stdin to the real terminal so Clack reads behave consistently.
+  # curl … | sudo bash leaves stdin on a pipe — attach stdin to the real terminal
+  # so Clack reads behave consistently.  Save the original fd so we can restore
+  # it after the questionnaire — leaving stdin on /dev/tty causes backgrounded
+  # processes to hold the tty open and prevents the script from exiting.
+  local need_stdin_restore=0
   if [[ ! -t 0 ]]; then
+    exec 3<&0          # save original stdin to fd 3
     exec </dev/tty 2>/dev/null || true
+    need_stdin_restore=1
   fi
 
   export TERM="${TERM:-xterm-256color}"
@@ -262,6 +268,11 @@ run_backup_host_questionnaire() {
   source "$env_out"
   rm -f "$env_out"
   rm -rf "$work"
+
+  # Restore stdin so later backgrounded processes don't inherit /dev/tty.
+  if [[ "$need_stdin_restore" -eq 1 ]]; then
+    exec <&3 3<&-      # restore original stdin, close fd 3
+  fi
 }
 
 #
@@ -1172,18 +1183,17 @@ install_host_app_from_appimage_url() {
     dest_dir="${target_home}/.local/share/backr"
     dest="${dest_dir}/backr"
 
-    # Skip rebuild when a working binary already exists (re-run of the script).
-    # Validate with ldd — a binary linked against the wrong webkit2gtk will
-    # show "not found" and must be rebuilt.
-    if [[ -x "$dest" ]]; then
-      if ldd "$dest" 2>&1 | grep -q "not found"; then
-        echo "Existing binary at ${dest} has missing libraries — rebuilding …"
-        rm -f "$dest"
-      else
-        echo "Native binary already installed at ${dest} — skipping rebuild."
-        return 0
-      fi
+    # Skip rebuild when a correctly-built binary already exists (re-run).
+    # A companion marker file (.tauri-built) is written after a successful
+    # 'tauri build' — earlier builds used raw 'cargo build' which produces
+    # a binary that passes ldd but has no embedded frontend assets.
+    local build_marker="${dest_dir}/.tauri-built"
+    if [[ -x "$dest" ]] && [[ -f "$build_marker" ]]; then
+      echo "Native binary already installed at ${dest} — skipping rebuild."
+      return 0
     fi
+    # Remove stale binary from a previous broken build method.
+    [[ -f "$dest" ]] && rm -f "$dest"
 
     install_host_tauri_system_deps
 
@@ -1267,6 +1277,9 @@ install_host_app_from_appimage_url() {
 
     mkdir -p "$dest_dir"
     install -m 755 -o "$target_user" -g "$target_user" "$built_bin" "$dest"
+    # Marker confirms this binary was built with 'tauri build' (frontend embedded).
+    touch "$build_marker"
+    chown "${target_user}:${target_user}" "$build_marker"
     echo "Installed native binary: ${dest}"
     rm -rf "$src_dir"
     return 0
@@ -1367,15 +1380,17 @@ launch_host_dashboard_app() {
   # Errors are logged to a file so launch failures can be diagnosed.
   local launch_log="${target_home}/.local/share/backr/launch.log"
   mkdir -p "$(dirname "$launch_log")"
-  # Close stdin (</dev/null), redirect stdout+stderr to log, background, and
-  # detach from process group via setsid so the script can exit cleanly.
-  # Without </dev/null the process inherits the script's /dev/tty fd (from
-  # the questionnaire's exec </dev/tty) and blocks the shell from exiting.
-  setsid runuser -u "$target_user" -- env \
+  # Close stdin so the app doesn't inherit the script's /dev/tty fd (from
+  # the questionnaire's exec </dev/tty).  Without this, the shell waits for
+  # all processes sharing that fd to exit before returning the prompt.
+  # Do NOT use setsid — it creates a new session that disconnects the process
+  # from the Wayland compositor's session tracking, preventing window creation.
+  runuser -u "$target_user" -- env \
     "${display_args[@]}" \
     BACKR_HOST_MODE=1 \
     "$dest" </dev/null >>"$launch_log" 2>&1 &
   local launch_pid=$!
+  disown "$launch_pid" 2>/dev/null || true
 
   # Give the process a moment to crash or start; report either way.
   sleep 2
