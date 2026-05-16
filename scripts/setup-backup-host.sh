@@ -1179,10 +1179,17 @@ install_host_app_from_appimage_url() {
     dest_dir="${target_home}/.local/share/backr"
     dest="${dest_dir}/backr"
 
-    # Skip rebuild when binary already exists (re-run of the script).
+    # Skip rebuild when a working binary already exists (re-run of the script).
+    # Validate with ldd — a binary linked against the wrong webkit2gtk will
+    # show "not found" and must be rebuilt.
     if [[ -x "$dest" ]]; then
-      echo "Native binary already installed at ${dest} — skipping rebuild."
-      return 0
+      if ldd "$dest" 2>&1 | grep -q "not found"; then
+        echo "Existing binary at ${dest} has missing libraries — rebuilding …"
+        rm -f "$dest"
+      else
+        echo "Native binary already installed at ${dest} — skipping rebuild."
+        return 0
+      fi
     fi
 
     install_host_tauri_system_deps
@@ -1191,18 +1198,25 @@ install_host_app_from_appimage_url() {
       ensure_nodejs_for_host_survey
     fi
 
-    # Resolve source tree: prefer local git clone, fall back to GitHub archive.
-    local src_dir="" src_is_temp=0
+    # Always build in a temp dir.  Using the live repo directly would require
+    # chown -R (breaks git for the original user) and pollutes the source tree
+    # with build artifacts.
+    local src_dir
+    src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
+
+    # Prefer copying from a local git clone when running from the repo.
     local script_dir=""
     if [[ -n "${BASH_SOURCE[0]:-}" ]] && [[ -f "${BASH_SOURCE[0]}" ]] && [[ "${BASH_SOURCE[0]}" != /dev/* ]]; then
       script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     fi
     if [[ -n "$script_dir" ]] && [[ -f "${script_dir}/../src-tauri/Cargo.toml" ]]; then
-      src_dir="$(cd "${script_dir}/.." && pwd)"
-      echo "Using local repo source at ${src_dir}"
+      local repo_root
+      repo_root="$(cd "${script_dir}/.." && pwd)"
+      echo "Copying local repo source to build directory …"
+      # Copy source files only — exclude heavy dirs that would slow things down.
+      rsync -a --exclude='node_modules' --exclude='.git' --exclude='target' \
+        "${repo_root}/" "${src_dir}/"
     else
-      src_dir="$(mktemp -d "${TMPDIR:-/tmp}/backr-src.XXXXXX")"
-      src_is_temp=1
       # BACKR_SCRIPTS_RAW_BASE uses raw.githubusercontent.com which cannot serve
       # archives; derive the proper github.com archive URL from the repo slug.
       local repo_slug=""
@@ -1221,7 +1235,12 @@ install_host_app_from_appimage_url() {
 
     chown -R "${target_user}:${target_user}" "$src_dir"
 
-    echo "Building Backr from source (this takes a few minutes on first run) …"
+    echo ""
+    echo "Building Backr from source …"
+    echo "  Step 1/3: npm ci (installing JS dependencies)"
+    echo "  Step 2/3: npm run build (compiling frontend)"
+    echo "  Step 3/3: cargo build --release (compiling Rust — 10-20 min on first run)"
+    echo ""
     runuser -u "$target_user" -- bash -c "
       export HOME='${target_home}'
       export CARGO_HOME=\"\${CARGO_HOME:-\$HOME/.cargo}\"
@@ -1233,13 +1252,17 @@ install_host_app_from_appimage_url() {
       fi
       [[ -f \"\$HOME/.cargo/env\" ]] && source \"\$HOME/.cargo/env\"
       cd '$src_dir'
+      echo '── Step 1/3: npm ci ──'
       npm ci
+      echo '── Step 2/3: npm run build ──'
       npm run build
+      echo '── Step 3/3: cargo build --release (this is the slow step) ──'
       cd src-tauri
       cargo build --release
+      echo '── Build complete ──'
     " || {
       echo "error: source build failed." >&2
-      [[ "$src_is_temp" -eq 1 ]] && rm -rf "$src_dir"
+      rm -rf "$src_dir"
       SKIP_HOST_APPIMAGE=1
       return 1
     }
@@ -1247,7 +1270,7 @@ install_host_app_from_appimage_url() {
     local built_bin="${src_dir}/src-tauri/target/release/backr"
     if [[ ! -f "$built_bin" ]]; then
       echo "error: build completed but binary not found at ${built_bin}" >&2
-      [[ "$src_is_temp" -eq 1 ]] && rm -rf "$src_dir"
+      rm -rf "$src_dir"
       SKIP_HOST_APPIMAGE=1
       return 1
     fi
@@ -1255,7 +1278,7 @@ install_host_app_from_appimage_url() {
     mkdir -p "$dest_dir"
     install -m 755 -o "$target_user" -g "$target_user" "$built_bin" "$dest"
     echo "Installed native binary: ${dest}"
-    [[ "$src_is_temp" -eq 1 ]] && rm -rf "$src_dir"
+    rm -rf "$src_dir"
     return 0
   fi
 

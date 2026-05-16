@@ -16,6 +16,7 @@ src-tauri/target/
 .npm-cache/
 
 # Editor / OS
+.cursor/
 .DS_Store
 Thumbs.db
 
