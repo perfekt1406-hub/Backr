@@ -1127,6 +1127,28 @@ ensure_appimage_runtime_libs() {
   esac
 }
 
+#
+# Ensures this machine opens Backr in CLIENT mode.  The app boots the host
+# dashboard whenever /etc/backr/host.toml exists (written by setup-backup-host.sh),
+# so a box that was ever a backup host would otherwise show the host UI even after
+# a client install.  Setting up a client means "make this a client", so remove the
+# marker (best-effort, needs root/sudo).  Re-run setup-backup-host.sh to flip back.
+#
+clear_host_marker_for_client() {
+  local marker="/etc/backr/host.toml"
+  if [[ -f "$marker" ]]; then
+    echo "Found host-dashboard marker ${marker} — this machine was set up as a Backr HOST."
+    echo "Removing it so Backr opens in CLIENT mode here (re-run setup-backup-host.sh to make it a host again)."
+    if [[ "${EUID:-0}" -eq 0 ]] || command -v sudo &>/dev/null; then
+      run_privileged rm -f "$marker" 2>/dev/null ||
+        echo "warning: could not remove ${marker} — remove it manually: sudo rm -f ${marker}" >&2
+    else
+      echo "warning: need root/sudo to remove ${marker} — run: sudo rm -f ${marker}" >&2
+    fi
+  fi
+  echo "Backr will open in CLIENT mode on this machine."
+}
+
 main() {
   parse_args "$@"
   require_linux
@@ -1174,6 +1196,7 @@ main() {
 
   case "$SETUP_KIND" in
     download)
+      clear_host_marker_for_client
       install_appimage_from_network
       print_install_done
       ;;
@@ -1186,6 +1209,7 @@ main() {
       print_done
       ;;
     build)
+      clear_host_marker_for_client
       install_app_build_and_integrate
       print_install_done
       ;;

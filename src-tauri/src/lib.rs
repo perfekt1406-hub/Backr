@@ -66,7 +66,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // A second launch should reveal the existing instance.  The window may
+            // be hidden (hide-on-close) or minimized, so show + unminimize before
+            // focusing — set_focus alone cannot reveal a hidden window, which left
+            // the app un-reopenable from the launcher after the window was closed.
             if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
                 let _ = w.set_focus();
             }
         }))

@@ -1432,6 +1432,9 @@ write_host_marker() {
   chmod 755 "$meta_dir"
   printf '%s\n' "backup_root = \"${BACKR_ROOT}\"" "ssh_user = \"${BACKR_USER}\"" >"$f"
   chmod 644 "$f"
+  # This marker is what makes Backr open in HOST (dashboard) mode here; the client
+  # installer removes it so a client box opens in client mode (last setup wins).
+  echo "Wrote host marker ${f} — Backr opens in HOST (dashboard) mode on this machine."
 }
 
 #
