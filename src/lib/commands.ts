@@ -97,8 +97,9 @@ export async function hostAppendAuthorizedPubkey(pubkeyLine: string): Promise<Ho
   if (useDevMock()) {
     return devMockBackend.mockHostAppendAuthorizedPubkey(pubkeyLine);
   }
+  // Tauri exposes the Rust `pubkey_line` arg to JS as camelCase `pubkeyLine`.
   return invoke<HostTrustAppendResult>("host_append_authorized_pubkey", {
-    pubkey_line: pubkeyLine,
+    pubkeyLine,
   });
 }
 
@@ -177,7 +178,8 @@ export async function listProjects(probeRemote = false): Promise<ProjectInfo[]> 
   if (useDevMock()) {
     return devMockBackend.mockListProjects();
   }
-  return invoke<ProjectInfo[]>("list_projects", { probe_remote: probeRemote });
+  // Tauri exposes the Rust `probe_remote` arg to JS as camelCase `probeRemote`.
+  return invoke<ProjectInfo[]>("list_projects", { probeRemote });
 }
 
 /**
