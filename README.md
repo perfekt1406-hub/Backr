@@ -21,14 +21,24 @@ Installs OpenSSH + rsync, creates the `backr` account and `/srv/backr`, configur
 
 Use `--no-appimage` on headless servers (no desktop session).
 
-### 2. Laptop — run once from a repo clone
+### 2. Laptop — one command (builds from source)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-connecting-client.sh | bash
+```
+
+Run as your **normal user** (not `sudo`) — it elevates per-command for package installs. It downloads the source, installs all build deps (Node, Rust, Tauri libs), builds the AppImage, and adds it to your app menu. Works on Debian/Ubuntu, Fedora, Arch-based, openSUSE, and Alpine.
+
+Prefer a checkout? Clone and run the same script:
 
 ```bash
 git clone https://github.com/perfekt1406-hub/Backr.git && cd Backr
 ./scripts/setup-connecting-client.sh
 ```
 
-The wizard asks for the backup host's IP/hostname and SSH port, installs all build deps (Node, Rust, Tauri libs), builds the AppImage, adds it to the app menu, and runs `ssh-copy-id` to trust your key automatically (type the `backr` password once).
+The wizard asks for the backup host's IP/hostname and SSH port. To trust this laptop's key on the host it offers `ssh-copy-id`, but the `backr` account is passwordless by default — so usually you'll paste your public key (`~/.ssh/id_ed25519.pub`) into Backr on the host → **Trust keys** (`#/host/trust`), or append it to `~backr/.ssh/authorized_keys`.
+
+> **Re-running updates:** running either setup command again rebuilds from the latest source and replaces the installed app (stopping any running instance first).
 
 ### 3. Open Backr from the app menu and finish the in-app setup wizard.
 
