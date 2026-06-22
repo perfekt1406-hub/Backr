@@ -1183,21 +1183,19 @@ install_host_app_from_appimage_url() {
     dest_dir="${target_home}/.local/share/backr"
     dest="${dest_dir}/backr"
 
-    # Only skip the rebuild when a binary produced by THIS script's production
-    # 'tauri build' path exists, proven by the companion .tauri-built marker.
-    # Without the marker gate, ANY pre-existing binary at $dest was kept across
-    # every re-run — so an early dev-mode build (one that loads the vite devUrl
-    # http://localhost:1420 instead of the embedded frontend, and shows
-    # "connection refused" on a host with no dev server) was never replaced,
-    # which is exactly what made successive build-method changes have no effect.
-    # The marker is written only after a successful production build below.
-    local build_marker="${dest_dir}/.tauri-built"
-    if [[ -x "$dest" ]] && [[ -f "$build_marker" ]]; then
-      echo "Native binary already installed at ${dest} — skipping rebuild."
-      return 0
+    # A re-run always reinstalls/updates: rebuild from the latest source and
+    # replace any existing binary instead of skipping.  Skipping a present binary
+    # would (a) never pick up updates and (b) risk keeping a stale or dev-mode
+    # build — one that loads the vite devUrl http://localhost:1420 and shows
+    # "connection refused" on a host with no dev server.  To re-run only for the
+    # SSH/firewall setup without the 10-20 min rebuild, pass --no-appimage /
+    # BACKR_NO_HOST_APPIMAGE=1.
+    if [[ -x "$dest" ]]; then
+      echo "Existing Backr binary found at ${dest} — rebuilding from latest source to reinstall/update …"
     fi
-    # Drop any unmarked binary — it predates the verified production build path.
-    [[ -f "$dest" ]] && rm -f "$dest"
+    # Remove the old binary and the now-obsolete .tauri-built marker left by
+    # earlier script versions; the fresh build below replaces the binary.
+    rm -f "$dest" "${dest_dir}/.tauri-built"
 
     install_host_tauri_system_deps
 
@@ -1281,9 +1279,6 @@ install_host_app_from_appimage_url() {
 
     mkdir -p "$dest_dir"
     install -m 755 -o "$target_user" -g "$target_user" "$built_bin" "$dest"
-    # Marker confirms this binary was built with 'tauri build' (frontend embedded).
-    touch "$build_marker"
-    chown "${target_user}:${target_user}" "$build_marker"
     echo "Installed native binary: ${dest}"
     rm -rf "$src_dir"
     return 0
@@ -1387,6 +1382,14 @@ launch_host_dashboard_app() {
   # which caused the launch failure to be misdiagnosed as a rendering/dmabuf bug.
   local launch_log="${target_home}/.local/share/backr/launch.log"
   mkdir -p "$(dirname "$launch_log")"
+  # A re-run reinstalls a fresh binary, so stop any previously running instance
+  # first — otherwise tauri-plugin-single-instance would just focus the OLD
+  # version and the update would appear not to take effect.  Best-effort: this
+  # script runs as root, so the signal reaches the desktop user's process.
+  if command -v pkill &>/dev/null; then
+    pkill -x backr 2>/dev/null || true
+    sleep 1   # let it release the single-instance lock before relaunching
+  fi
   # Close stdin so the app doesn't inherit the script's /dev/tty fd (from
   # the questionnaire's exec </dev/tty).  Without this, the shell waits for
   # all processes sharing that fd to exit before returning the prompt.
