@@ -71,6 +71,8 @@ SURVEY_CLIENT_SERVER_READY="${SURVEY_CLIENT_SERVER_READY:-unknown}"
 SURVEY_CLIENT_SSH_PORT="${SURVEY_CLIENT_SSH_PORT:-unknown}"
 SURVEY_CLIENT_SSH_CUSTOM_PORT="${SURVEY_CLIENT_SSH_CUSTOM_PORT:-}"
 SURVEY_CLIENT_HOST_PLAN="${SURVEY_CLIENT_HOST_PLAN:-unknown}"
+# Wizard's answer to "create an SSH key?" (yes|no|exists|empty). See maybe_create_ssh_key.
+SURVEY_CLIENT_GEN_SSH_KEY="${SURVEY_CLIENT_GEN_SSH_KEY:-}"
 BACKR_SETUP_PUBKEY_LINE="${BACKR_SETUP_PUBKEY_LINE:-}"
 
 APT_UPDATED=0
@@ -611,39 +613,40 @@ install_node_project_deps() {
   fi
 }
 
+#
+# Ensures the SSH key Backr backups use: an existing ~/.ssh/id_ed25519 is reused
+# as-is ("use if found"); a missing one is created ("create if not found") when the
+# user opted in — via the wizard's "use a key?" answer (SURVEY_CLIENT_GEN_SSH_KEY=yes)
+# or --auto-ssh-key / BACKR_AUTO_SSH_KEY.  The key is passphraseless so the
+# scheduler / cron can authenticate unattended.  Declining only matters when no key
+# exists (then it is skipped with a hint).  No interactive `read` — the choice comes
+# from the clack wizard, which attaches /dev/tty and so works under `curl | bash`.
+#
 maybe_create_ssh_key() {
   command -v ssh-keygen &>/dev/null || return 0
-  local priv="$HOME/.ssh/id_ed25519"
   [[ "$SKIP_KEYGEN" -eq 1 ]] && return 0
+  local priv="$HOME/.ssh/id_ed25519"
+  # Use if found — never overwrite an existing key.
   if [[ -f "$priv" ]]; then
-    echo "SSH private key already present: ${priv}"
+    echo "Using existing SSH key: ${priv}"
     return 0
   fi
+
+  if [[ "$AUTO_SSH_KEY" -ne 1 ]] && [[ "${SURVEY_CLIENT_GEN_SSH_KEY:-}" != "yes" ]]; then
+    echo "No Ed25519 key at ${priv} — skipping generation."
+    echo "  Scheduled/cron backups need a passwordless key. Create one later with:"
+    echo "    ssh-keygen -t ed25519 -f ${priv} -N \"\""
+    echo "  or re-run with --auto-ssh-key."
+    return 0
+  fi
+
   mkdir -p "$HOME/.ssh"
   chmod 700 "$HOME/.ssh"
-
-  if [[ "$AUTO_SSH_KEY" -eq 1 ]]; then
-    echo "Creating Ed25519 SSH key (auto): ${priv}"
-    # External: OpenSSH ssh-keygen writes keys under ~/.ssh (inputs: type, path, empty passphrase; outputs: keypair files).
-    ssh-keygen -t ed25519 -f "$priv" -N "" -C "backr-$(whoami)@$(hostname -s 2>/dev/null || echo host)"
-    echo "Created ${priv} and ${priv}.pub"
-    return 0
-  fi
-
-  if [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]]; then
-    echo "No Ed25519 key at ${priv} — skipping generation (--non-interactive). Use --auto-ssh-key or create a key before backups."
-    return 0
-  fi
-
-  echo "No Ed25519 key found at ${priv}."
-  read -r -p "Generate one now? [y/N] " ans || true
-  if [[ "${ans:-}" =~ ^[yY]$ ]]; then
-    # External: OpenSSH ssh-keygen writes keys under ~/.ssh.
-    ssh-keygen -t ed25519 -f "$priv" -N "" -C "backr-$(whoami)@$(hostname -s 2>/dev/null || echo host)"
-    echo "Created ${priv} and ${priv}.pub"
-  else
-    echo "Skipping key generation; create a key manually before using Backr backups."
-  fi
+  echo "Creating Ed25519 SSH key: ${priv}"
+  # External: OpenSSH ssh-keygen writes keys under ~/.ssh (empty passphrase so the
+  # scheduler can authenticate unattended).
+  ssh-keygen -t ed25519 -f "$priv" -N "" -C "backr-$(whoami)@$(hostname -s 2>/dev/null || echo host)"
+  echo "Created ${priv} and ${priv}.pub"
 }
 
 ensure_projects_dir() {
@@ -1154,15 +1157,15 @@ main() {
 
   connecting_client_prepare_interactive_wizard
 
-  if [[ "$AUTO_SSH_KEY" -eq 1 ]] || [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]] || survey_tty_is_usable_client; then
-    maybe_create_ssh_key
-  fi
-
   run_connecting_client_questionnaire
 
   if [[ -z "$BACKUP_SSH_TARGET" ]] && [[ -n "${BACKR_BACKUP_HOST:-}" ]]; then
     BACKUP_SSH_TARGET="$BACKR_BACKUP_HOST"
   fi
+
+  # Create the SSH key per the wizard's answer (or --auto-ssh-key), after the
+  # questionnaire so its choice is available and before the steps that use the key.
+  maybe_create_ssh_key
 
   # Default when no mode flags: build the native binary locally and install menu entry.
   SETUP_KIND="${SETUP_KIND:-build}"

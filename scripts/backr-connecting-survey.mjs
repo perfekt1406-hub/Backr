@@ -34,6 +34,7 @@ function writeCancelledDefaults(envFile) {
     "export SURVEY_CLIENT_SSH_PORT=unknown",
     "export SURVEY_CLIENT_SSH_CUSTOM_PORT=",
     "export SURVEY_CLIENT_HOST_PLAN=unknown",
+    "export SURVEY_CLIENT_GEN_SSH_KEY=",
     "# BACKUP_SSH_TARGET unchanged — set via CLI/env if needed",
   ];
   writeFileSync(envFile, `${lines.join("\n")}\n`, "utf8");
@@ -79,6 +80,21 @@ async function runWizard(ctx) {
     "Public key = one line from ~/.ssh/id_ed25519.pub (OK to copy). Private key stays on this laptop. Trust keys = Backr screen on the backup PC (#/host/trust) to paste that line.",
     "SSH in one sentence",
   );
+
+  // Ask whether backups should use an SSH key.  "yes" → the bash side reuses an
+  // existing ~/.ssh/id_ed25519 or creates one if missing ("create if not found,
+  // use if found").  Asked via clack, which attaches /dev/tty, so the prompt works
+  // under `curl | bash`.
+  const wantKey = await p.confirm({
+    message:
+      "Use an SSH key for passwordless backups? (creates one if you don't have it — required for scheduled / cron backups)",
+    initialValue: true,
+  });
+  if (p.isCancel(wantKey)) {
+    writeCancelledDefaults(envFile);
+    process.exit(0);
+  }
+  const genSshKey = wantKey ? "yes" : "no";
 
   const portChoice = await p.select({
     message: "Which SSH port does the backup server's sshd listen on (from here)?",
@@ -143,6 +159,7 @@ async function runWizard(ctx) {
     `export SURVEY_CLIENT_SSH_PORT=${shellSingleQuote(sshPort)}`,
     `export SURVEY_CLIENT_SSH_CUSTOM_PORT=${shellSingleQuote(sshCustom)}`,
     `export SURVEY_CLIENT_HOST_PLAN=${shellSingleQuote(hostPlanOut)}`,
+    `export SURVEY_CLIENT_GEN_SSH_KEY=${shellSingleQuote(genSshKey)}`,
   ];
   if (backupSshTarget) {
     lines.push(`export BACKUP_SSH_TARGET=${shellSingleQuote(backupSshTarget)}`);
