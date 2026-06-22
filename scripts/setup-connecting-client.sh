@@ -9,8 +9,13 @@
 #       SSH port + optional backup host; default ssh-copy-id when --backup-host BatchMode probe fails (Trust keys fallback),
 #       tailored hints when /dev/tty exists.
 #
-# Run from anywhere with sudo available when elevated installs are needed:
+# Run from a checkout, or as a curl one-liner (downloads the source, builds from source):
 #   ./scripts/setup-connecting-client.sh [options]
+#   curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-connecting-client.sh | bash
+#
+# Re-running reinstalls/updates: it rebuilds from the latest source and replaces the
+# installed app, stopping any running instance first so the update takes effect.
+# Run as your normal user (NOT sudo) — the script elevates per-command for package installs.
 #
 # Options:
 #   --projects-dir PATH            Local folder containing one subdirectory per project (default: ~/Projects).
@@ -41,7 +46,12 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve the repo root from the script location.  Tolerate `curl | bash`, where
+# BASH_SOURCE[0] may be unset and there is no checkout — resolve_repo_source()
+# then downloads the source and repoints REPO_ROOT.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd || true)"
+# Set to 1 when REPO_ROOT is a downloaded temp tree (curl mode) so it is cleaned up.
+SRC_IS_TEMP=0
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
 SKIP_KEYGEN=0
 # When 1, skip interactive ssh-copy-id after failed BatchMode probe (see BACKR_NO_SSH_COPY_ID).
@@ -717,6 +727,10 @@ install_appimage_desktop_integration() {
   local dest_dir="$HOME/.local/share/backr"
   local dest="${dest_dir}/Backr.AppImage"
   mkdir -p "$dest_dir"
+  # AppImages need libfuse2 at runtime; install it (best-effort) so the app runs.
+  ensure_appimage_runtime_libs
+  # Stop any running instance first so the file isn't busy and the update applies.
+  stop_running_backr
   cp -f "$src" "$dest"
   chmod u+x "$dest" || true
 
@@ -724,6 +738,9 @@ install_appimage_desktop_integration() {
 
   local desktop="$HOME/.local/share/applications/com.backr.app.desktop"
   mkdir -p "$(dirname "$desktop")"
+  # WEBKIT_DISABLE_DMABUF_RENDERER=1 guards against white/blank windows on
+  # Wayland (WebKitGTK DMA-BUF failures with rolling-release Mesa).  The binary
+  # also self-applies this, but set it here too to match the host launcher.
   cat >"$desktop" <<EOF
 [Desktop Entry]
 Version=1.5
@@ -731,7 +748,7 @@ Type=Application
 Name=Backr
 GenericName=Backup client
 Comment=Backr desktop backup client (rsync snapshots over SSH)
-Exec=${dest} %u
+Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 ${dest} %u
 TryExec=${dest}
 Icon=com.backr.app
 Terminal=false
@@ -771,6 +788,9 @@ install_appimage_build_and_integrate() {
   ensure_projects_dir
   install_node_project_deps
   echo "Building Backr AppImage (npm run tauri:build) …"
+  # beforeBuildCommand copies the linuxdeploy gtk plugin into ~/.cache/tauri;
+  # create it so the build doesn't fail on a fresh machine (curl one-liner).
+  mkdir -p "$HOME/.cache/tauri"
   (cd "$REPO_ROOT" && npm run tauri:build)
   install_appimage_desktop_integration "$(find_built_appimage_path)"
 }
@@ -972,6 +992,88 @@ reinstall_backr_launcher_only() {
   echo "Still missing from the menu? Log out and back in (or reboot). If you originally ran setup with sudo, the app may be under /root/.local — re-run this script without sudo."
 }
 
+#
+# Inputs: REPO_ROOT (from BASH_SOURCE). Outputs: a usable Backr source tree.
+# When run from a checkout (package.json + src-tauri/Cargo.toml present) it is
+# used as-is.  When piped via `curl … | bash` there is no checkout, so the
+# latest source tarball is downloaded to a temp dir and REPO_ROOT is repointed
+# there (SRC_IS_TEMP=1 so cleanup_temp_source removes it on exit).  This lets the
+# same script run both from a clone and as a curl one-liner, building from source.
+# External: curl downloads the GitHub branch tarball; tar extracts it.
+#
+resolve_repo_source() {
+  if [[ -n "$REPO_ROOT" ]] && [[ -f "$REPO_ROOT/package.json" ]] && [[ -f "$REPO_ROOT/src-tauri/Cargo.toml" ]]; then
+    return 0
+  fi
+  echo "No local repo checkout detected — downloading Backr source (curl one-liner mode) …"
+  command -v curl &>/dev/null || die "curl is required to download the Backr source"
+  command -v tar &>/dev/null || die "tar is required to extract the Backr source"
+  local repo_slug="${BACKR_REPO_SLUG:-perfekt1406-hub/Backr}"
+  local branch="${BACKR_REPO_BRANCH:-main}"
+  local tarball_url="https://github.com/${repo_slug}/archive/refs/heads/${branch}.tar.gz"
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/backr-client-src.XXXXXX")"
+  echo "Downloading ${tarball_url} …"
+  if ! curl -fsSL "$tarball_url" | tar -xz -C "$tmp" --strip-components=1; then
+    rm -rf "$tmp"
+    die "failed to download Backr source from ${tarball_url} (set BACKR_REPO_SLUG / BACKR_REPO_BRANCH to override)"
+  fi
+  REPO_ROOT="$tmp"
+  SRC_IS_TEMP=1
+  echo "Using downloaded source at ${REPO_ROOT}"
+}
+
+#
+# Removes the temp source tree downloaded by resolve_repo_source (curl mode).
+# No-op for local checkouts.  Registered on EXIT.
+#
+cleanup_temp_source() {
+  [[ "${SRC_IS_TEMP:-0}" -eq 1 ]] || return 0
+  [[ -n "${REPO_ROOT:-}" && -d "$REPO_ROOT" ]] && rm -rf "$REPO_ROOT"
+  return 0
+}
+
+#
+# Stops any running Backr instance before a (re)install.  A running AppImage
+# holds its file open, so overwriting it would fail with "text file busy", and
+# tauri-plugin-single-instance would otherwise keep focusing the old version
+# after an update.  Best-effort — absent pkill or no match is fine.
+#
+stop_running_backr() {
+  command -v pkill &>/dev/null || return 0
+  if pkill -x backr 2>/dev/null || pkill -f '/Backr\.AppImage' 2>/dev/null; then
+    echo "Stopped a running Backr instance so it can be updated."
+    sleep 1
+  fi
+  return 0
+}
+
+#
+# Installs the libfuse2 runtime that AppImages need to launch (best-effort, per
+# distro).  Without it the freshly built AppImage fails to start on a clean
+# machine (e.g. Debian 12+, which no longer ships libfuse2 by default).  Skipped
+# when we cannot elevate.  WebKitGTK/other runtime libs come in as deps of the
+# -dev packages from install_connecting_os_packages.
+#
+ensure_appimage_runtime_libs() {
+  [[ "${EUID:-0}" -eq 0 ]] || command -v sudo &>/dev/null || return 0
+  local backend
+  backend="$(detect_pkg_backend)"
+  echo "Ensuring AppImage runtime (libfuse2) for ${backend} …"
+  case "$backend" in
+    apt)
+      apt_update_once
+      run_privileged apt-get install -y libfuse2 2>/dev/null ||
+        run_privileged apt-get install -y libfuse2t64 2>/dev/null || true
+      ;;
+    dnf) run_privileged dnf install -y fuse-libs 2>/dev/null || true ;;
+    yum) run_privileged yum install -y fuse-libs 2>/dev/null || true ;;
+    pacman) run_privileged pacman -Sy --noconfirm fuse2 2>/dev/null || true ;;
+    zypper) run_privileged zypper --non-interactive install -y libfuse2 2>/dev/null || true ;;
+    apk) run_privileged apk add --no-cache fuse 2>/dev/null || true ;;
+  esac
+}
+
 main() {
   parse_args "$@"
   require_linux
@@ -989,6 +1091,11 @@ main() {
     [[ "${CLI_SSH_PORT}" =~ ^[0-9]+$ ]] || die "--ssh-port / BACKR_SSH_PORT must be digits only, got: ${CLI_SSH_PORT}"
     [[ "${CLI_SSH_PORT}" -ge 1 && "${CLI_SSH_PORT}" -le 65535 ]] || die "--ssh-port / BACKR_SSH_PORT out of range: ${CLI_SSH_PORT}"
   fi
+
+  # Ensure a source tree exists (download it in curl one-liner mode) and clean
+  # up any temp download on exit, before anything that reads from REPO_ROOT.
+  resolve_repo_source
+  trap cleanup_temp_source EXIT
 
   connecting_client_prepare_interactive_wizard
 
