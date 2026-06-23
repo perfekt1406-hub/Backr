@@ -93,6 +93,7 @@
 
 <!-- ─────────────────────────────────────────────────────────────────────────── -->
 
+<div class="flex min-h-0 flex-1 flex-col gap-8 px-10 py-10">
 <div class="flex max-w-3xl flex-col gap-6">
 
   <!-- ── Host info (read-only) ── -->
@@ -250,4 +251,5 @@
     </div>
   </section>
 
+</div>
 </div>

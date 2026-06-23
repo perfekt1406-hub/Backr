@@ -74,6 +74,8 @@
 
 <!-- ─────────────────────────────────────────────────────────────────────────── -->
 
+<div class="flex min-h-0 flex-1 flex-col gap-8 px-10 py-10">
+
 {#if loadErr}
   <p class="text-[13px] text-[var(--warn)]">{loadErr}</p>
 {:else if !config}
@@ -238,3 +240,5 @@
 
   </div>
 {/if}
+
+</div>
