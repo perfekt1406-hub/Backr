@@ -50,7 +50,8 @@ pub fn advertise(port: u16) -> Result<(ServiceDaemon, String), String> {
     Ok((daemon, fullname))
 }
 
-/// Browses the LAN for hosts in pairing mode for up to `timeout`, de-duplicated by address.
+/// Browses the LAN for hosts in pairing mode for up to `timeout`, de-duplicated by hostname.
+/// When a host advertises both IPv4 and IPv6 addresses, IPv4 is preferred.
 pub fn discover_hosts(timeout: Duration) -> Result<Vec<DiscoveredHost>, String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     let receiver = daemon
@@ -62,15 +63,24 @@ pub fn discover_hosts(timeout: Duration) -> Result<Vec<DiscoveredHost>, String> 
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         match receiver.recv_timeout(remaining) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                if let Some(addr) = info.get_addresses().iter().next() {
-                    let address = format!("{addr}:{}", info.get_port());
-                    if hosts.iter().any(|h| h.address == address) {
-                        continue;
+                let addrs = info.get_addresses();
+                // Prefer IPv4 so we don't surface a long IPv6 address when a clean
+                // IPv4 one is available for the same host.
+                let best = addrs.iter().find(|a| a.is_ipv4()).or_else(|| addrs.iter().next());
+                let Some(addr) = best else { continue };
+
+                let address = format!("{addr}:{}", info.get_port());
+                let hostname = info
+                    .get_property_val_str("hostname")
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| info.get_hostname().trim_end_matches('.').to_string());
+
+                // Deduplicate by hostname; upgrade an existing IPv6 entry to IPv4.
+                if let Some(existing) = hosts.iter_mut().find(|h| h.hostname == hostname) {
+                    if addr.is_ipv4() {
+                        existing.address = address;
                     }
-                    let hostname = info
-                        .get_property_val_str("hostname")
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| info.get_hostname().trim_end_matches('.').to_string());
+                } else {
                     hosts.push(DiscoveredHost { hostname, address });
                 }
             }
