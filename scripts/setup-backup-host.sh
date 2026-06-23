@@ -32,6 +32,7 @@
 #   --no-appimage             Skip the Backr AppImage download and auto-launch (headless/server installs).
 #   --desktop-user USER       OS user who gets the Backr AppImage + .desktop entry (default: $SUDO_USER or first non-system user).
 #   --dry-run                 Print actions only.
+#   --verbose                 Print detected OS/firewall/sshd diagnostics after setup.
 #   -h, --help                Show this text.
 #
 # Environment:
@@ -49,10 +50,11 @@ set -euo pipefail
 BACKR_USER="${BACKR_USER:-backr}"
 BACKR_ROOT="${BACKR_ROOT:-/srv/backr}"
 DRY_RUN=0
+VERBOSE=0
 SKIP_FIREWALL=0
 # Optional pubkey bootstrap (see append_trust_pubkeys_from_cli_or_env).
 TRUST_PUBKEY_FILE_CLI=""
-# Questionnaire / non-interactive (see run_backup_host_questionnaire / emit_backup_host_custom_next_steps).
+# Questionnaire / non-interactive (see run_backup_host_questionnaire).
 BACKR_NON_INTERACTIVE="${BACKR_NON_INTERACTIVE:-0}"
 SURVEY_SKIP_NO_TTY=0
 SURVEY_DEPLOYMENT="${SURVEY_DEPLOYMENT:-unknown}"
@@ -103,6 +105,10 @@ parse_args() {
         ;;
       --dry-run)
         DRY_RUN=1
+        shift
+        ;;
+      --verbose)
+        VERBOSE=1
         shift
         ;;
       --trust-pubkey-file)
@@ -204,7 +210,7 @@ ensure_nodejs_for_host_survey() {
 
 #
 # Runs an interactive @clack/prompts questionnaire when a usable TTY exists and BACKR_NON_INTERACTIVE is unset.
-# Outputs: fills SURVEY_* globals used by emit_backup_host_custom_next_steps (sources a temp env file from Node).
+# Outputs: fills SURVEY_* globals from the questionnaire (sources a temp env file from Node).
 # External: node runs scripts/backr-host-survey.mjs; npm installs @clack/prompts in a temp dir; curl may fetch the mjs from BACKR_SCRIPTS_RAW_BASE.
 #
 run_backup_host_questionnaire() {
@@ -275,130 +281,6 @@ run_backup_host_questionnaire() {
   fi
 }
 
-#
-# Inputs: SURVEY_* answers and runtime detection already printed. Outputs: tailored «what to do next» for unknowns.
-#
-emit_backup_host_custom_next_steps() {
-  [[ "$DRY_RUN" -eq 1 ]] && return 0
-
-  local eff_ports=""
-  if command -v sshd &>/dev/null; then
-    eff_ports="$(sshd -T 2>/dev/null | grep -i '^port ' | awk '{printf "%s ", $2}' | sed 's/[[:space:]]*$//')"
-  fi
-
-  # Gather LAN IPs once — used in the LAN-specific numbered checklist.
-  local lan_ips="" primary_ip=""
-  if command -v hostname &>/dev/null; then
-    lan_ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -n 4 | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)"
-  fi
-  primary_ip="$(echo "$lan_ips" | awk '{print $1}')"
-
-  echo ""
-  echo "── Your next steps (based on your questionnaire + this machine) ──"
-
-  if [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]]; then
-    cat <<'NXT'
-You used --non-interactive / BACKR_NON_INTERACTIVE — questionnaire was skipped.
-
-  • If this was curl | sudo bash: run again from an interactive shell without --non-interactive if you want tailored hints.
-  • Trust path (passwordless backr): paste laptop pubkeys via Backr → Trust keys (#/host/trust), edit ~BACKR_USER/.ssh/authorized_keys over SSH, or re-run with --trust-pubkey-file / BACKR_TRUST_PUBKEY to append automatically.
-  • Clients must reach the sshd Port shown above (same for LAN router/VPN/firewall rules).
-
-NXT
-    return 0
-  fi
-
-  if [[ "${SURVEY_SKIP_NO_TTY:-0}" == "1" ]]; then
-    cat <<'NXT'
-No usable interactive terminal — questionnaire was skipped (common with SSH without a TTY, serial/IPMI consoles, Docker without `-it`, or some cloud agents).
-
-  • Prefer an ordinary login shell: `ssh -t user@HOST`, then `curl … | sudo bash` from there — or clone the repo and run `sudo bash scripts/setup-backup-host.sh`.
-  • Add `--non-interactive` when you intentionally want zero prompts on headless installs.
-  • Interactive setup needs Node.js 18+ and runs a short @clack/prompts wizard (installed automatically when possible).
-
-NXT
-  fi
-
-  # ── Reach-specific guidance ──────────────────────────────────────────────────────────────
-
-  case "$SURVEY_REACH" in
-
-    lan_only)
-      cat <<EOF
-• LAN-only path — checklist:
-
-    1. This machine's LAN address(es): ${lan_ips:-run 'ip addr' to find them}
-       SSH port: ${eff_ports:-22}
-
-    2. On each laptop, clone the repo and run:
-         ./scripts/setup-connecting-client.sh
-       The wizard will ask for this machine's IP/hostname and SSH port.
-       It installs deps, builds the AppImage, adds the app launcher, and at the
-       end automatically runs ssh-copy-id to trust the laptop's key on this machine
-       (you type the ${BACKR_USER} account password once at the prompt).
-
-    3. Open Backr on the laptop and complete the in-app setup wizard.
-
-  Note: backups only run while the laptop is on this same LAN — expected behaviour.
-
-EOF
-      ;;
-
-    internet)
-      printf '%s\n' "• Effective sshd TCP ports here: ${eff_ports:-unknown} (full detail above)."
-      cat <<'NXT'
-• Internet exposure: confirm your port-forward / cloud security group allows inbound TCP to the sshd port above; key-only backr is enforced automatically once authorized_keys has at least one key.
-
-NXT
-      ;;
-
-    vpn)
-      printf '%s\n' "• Effective sshd TCP ports here: ${eff_ports:-unknown} (full detail above)."
-      cat <<'NXT'
-• VPN path: document the VPN endpoint for laptops; SSH targets are usually private IPs visible only while VPN is up. Use --ssh-port on the client script when sshd is not on port 22.
-
-NXT
-      ;;
-
-    unknown | *)
-      printf '%s\n' "• Effective sshd TCP ports here: ${eff_ports:-unknown} (full detail above)."
-      cat <<'NXT'
-• You weren't sure how clients reach SSH. Check both paths:
-    LAN:      ping this host's private IP from another device on the same network, then: nc -vz HOST 22 (or your SSH port).
-    Internet: ensure your router forwards the SSH port to this machine and/or open the port in your cloud security group.
-  If only VPN works, connect VPN first on the laptop before testing SSH.
-
-NXT
-      ;;
-  esac
-
-  # ── Key-trust guidance for non-LAN paths (LAN block above is self-contained) ────────────
-
-  if [[ "$SURVEY_REACH" != "lan_only" ]]; then
-    case "$SURVEY_KEYPATH" in
-      backr_trust_ui)
-        cat <<'NXT'
-• Trust keys: open Backr on this machine → sidebar «Trust keys» (#/host/trust) → paste one full line from the laptop's ~/.ssh/id_ed25519.pub.
-
-NXT
-        ;;
-      console_later)
-        cat <<EOF
-• Manual key install: append one line from the laptop's ~/.ssh/id_ed25519.pub to ~${BACKR_USER}/.ssh/authorized_keys on this machine (file mode 600; .ssh directory mode 700).
-
-EOF
-        ;;
-      other_admin | unknown)
-        cat <<EOF
-• Coordinate with whoever admins SSH on this box — they need each laptop's single-line pubkey added to ${BACKR_USER}'s authorized_keys.
-
-EOF
-        ;;
-    esac
-  fi
-
-  echo ""
-}
 
 #
 # Echoes package backend: apt, dnf, yum, pacman, zypper, apk, or unknown (reads /etc/os-release).
@@ -1550,10 +1432,7 @@ EOF
   fi
   cat <<EOF
 
-On each laptop — clone the Backr repo and run:
-  ./scripts/setup-connecting-client.sh
-The wizard will ask for this machine's IP (${ip_line:-see Primary IP above}) and SSH port.
-It handles deps, AppImage install, and key trust (ssh-copy-id) automatically.
+  → Open Backr and use «Trust keys → Add a laptop» to connect a laptop in one tap.
 
 EOF
 }
@@ -1591,9 +1470,8 @@ main() {
   fi
 
   verify_backup_host_ready
-  report_detected_ssh_environment
+  [[ "${VERBOSE:-0}" -eq 1 ]] && report_detected_ssh_environment
   print_host_ready
-  emit_backup_host_custom_next_steps
 }
 
 main "$@"

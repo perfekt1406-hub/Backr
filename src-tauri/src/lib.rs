@@ -10,6 +10,7 @@ pub mod error;
 pub mod host_config;
 pub mod host_disk_inventory;
 pub mod host_trust;
+pub mod pairing;
 pub mod progress_sink;
 pub mod project_snapshot_cache;
 pub mod scheduler;
@@ -121,6 +122,11 @@ pub fn run() {
             commands::host_cmd::host_disk_inventory,
             commands::host_cmd::host_trust_status,
             commands::host_cmd::host_append_authorized_pubkey,
+            commands::pairing_cmd::start_pairing,
+            commands::pairing_cmd::stop_pairing,
+            commands::pairing_cmd::pairing_status,
+            commands::pairing_cmd::discover_hosts,
+            commands::pairing_cmd::pair_with_host,
             commands::system_cmd::get_system_info,
             commands::project_cmd::list_projects,
             commands::project_cmd::get_backup_status,

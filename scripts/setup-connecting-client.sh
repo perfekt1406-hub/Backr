@@ -219,7 +219,7 @@ run_connecting_client_questionnaire_clack() {
 
 #
 # Outputs: fills SURVEY_CLIENT_*; may set BACKUP_SSH_TARGET when user types host/IP.
-# Skips when BACKR_NON_INTERACTIVE or when no usable TTY (see emit_connecting_client_custom_next_steps).
+# Skips when BACKR_NON_INTERACTIVE or when no usable TTY.
 #
 run_connecting_client_questionnaire() {
   [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]] && return 0
@@ -236,59 +236,6 @@ run_connecting_client_questionnaire() {
 
   ensure_clack_prompts_pkg || die "failed to install @clack/prompts — run: cd ${REPO_ROOT} && npm install"
   run_connecting_client_questionnaire_clack || die "setup wizard failed — fix errors above or use --non-interactive"
-}
-
-#
-# Outputs: guidance derived from SURVEY_CLIENT_* plus optional BACKUP_SSH_TARGET state.
-#
-emit_connecting_client_custom_next_steps() {
-  echo ""
-  echo "── Your next steps (questionnaire + current CLI/env) ──"
-
-  if [[ "${BACKR_NON_INTERACTIVE:-0}" == "1" ]]; then
-    cat <<'NXT'
-• --non-interactive / BACKR_NON_INTERACTIVE skipped the questionnaire.
-
-  Run interactively (./scripts/setup-connecting-client.sh without --non-interactive) for tailored hints.
-  Finish backup-host setup first (curl … setup-backup-host.sh). With --backup-host, interactive runs offer ssh-copy-id when pubkey SSH fails; use --ssh-port / BACKR_SSH_PORT when sshd is not on 22. Otherwise use Backr → Trust keys (#/host/trust) or authorized_keys.
-
-NXT
-    return 0
-  fi
-
-  if [[ "${SURVEY_SKIP_NO_TTY:-0}" == "1" ]]; then
-    cat <<'NXT'
-• No usable interactive terminal — questionnaire was skipped (some CI environments, nested terminals, or SSH without a TTY).
-
-  Open a normal terminal locally or use `ssh -t`, then run `./scripts/setup-connecting-client.sh` again. The wizard uses Node @clack/prompts (`npm install` in the repo installs it).
-
-NXT
-  fi
-
-  if [[ -z "${BACKUP_SSH_TARGET:-}" ]] && [[ -z "${BACKR_BACKUP_HOST:-}" ]]; then
-    case "${SURVEY_CLIENT_HOST_PLAN:-unknown}" in
-      defer | unknown | '')
-        cat <<'NXT'
-• No backup SSH target yet: re-run with `--backup-host HOST` or export BACKR_BACKUP_HOST before setup.
-
-NXT
-        ;;
-    esac
-  fi
-
-  case "${SURVEY_CLIENT_SSH_PORT:-unknown}" in
-    unknown)
-      cat <<'NXT'
-• SSH port unsure: try `ssh -v -p 22 user@host`, then retry other `-p` values; match whatever «sshd Port» reports on the backup host script output.
-
-NXT
-      ;;
-    custom)
-      printf '%s\n' "• Custom SSH port ${SURVEY_CLIENT_SSH_CUSTOM_PORT:-?}: use \`ssh -p ${SURVEY_CLIENT_SSH_CUSTOM_PORT} …\` and the same in Backr's SSH settings after setup."
-      ;;
-  esac
-
-  echo ""
 }
 
 require_linux() {
@@ -838,11 +785,8 @@ find_built_appimage_path() {
 print_install_done() {
   cat <<EOF
 
-── Backr installed ──
-  App menu / grid: open Activities (GNOME), the KDE launcher, or your panel app menu — search «Backr».
-  Note: store-style «App Center» catalogs (Snap/Flatpak/Shop) only list published packages; this install uses the standard Linux .desktop + icon theme so the app appears like any other user app.
-  Installed under:  ~/.local/share/backr/
-  Uninstall later:  ./scripts/setup-connecting-client.sh --uninstall
+✓ Backr installed. Open it from your app menu (search «Backr») — it will find your
+  backup host and pair automatically. (Uninstall later: --uninstall.)
 
 EOF
 }
@@ -1219,7 +1163,6 @@ main() {
   esac
 
   verify_pubkey_ssh_or_print_bootstrap_line
-  emit_connecting_client_custom_next_steps
 }
 
 main "$@"

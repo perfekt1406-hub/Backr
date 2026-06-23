@@ -11,6 +11,7 @@ import type {
 } from "../../types/hostDashboard";
 import type { HostTrustAppendResult, HostTrustStatus } from "../../types/hostTrust";
 import type { Config } from "../../types/config";
+import type { DiscoveredHost, PairingStarted } from "../../types/pairing";
 import type { BackupStatus, ProjectInfo } from "../../types/project";
 import type { ShellBootstrap } from "../../types/shellBootstrap";
 import type { SystemInfo } from "../../types/systemInfo";
@@ -50,6 +51,17 @@ let activityHistory: ActivityPoint[] = [...seedActivityPoints()];
 
 /** Simulated authorized_keys line count for host Trust-keys IPC mocks. */
 let mockTrustPubkeyLineCount = 0;
+
+/** When true, the host dashboard mock reports no snapshots (first-run / not-paired preview). */
+let mockHostFirstRun = false;
+
+/** Dev switcher toggles the host first-run (no backups, not paired) preview state. */
+export function setMockHostFirstRun(firstRun: boolean): void {
+  mockHostFirstRun = firstRun;
+  if (firstRun) {
+    mockTrustPubkeyLineCount = 0; // show the un-paired state
+  }
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -280,6 +292,9 @@ export async function mockResolveShellBootstrap(): Promise<ShellBootstrap> {
  */
 export async function mockHostListSnapshotProjects(): Promise<HostProjectRow[]> {
   await delay(30);
+  if (mockHostFirstRun) {
+    return []; // first-run preview → HostDashboardView shows HostSetupGuide
+  }
   const orderedSnaps = [...MOCK_SNAPSHOT_NAMES].sort((a, b) => b.localeCompare(a));
   const recentForCount = (n: number): string[] =>
     n <= 0 ? [] : orderedSnaps.slice(0, Math.min(3, orderedSnaps.length));
@@ -376,4 +391,55 @@ export async function mockHostAppendAuthorizedPubkey(
     pubkey_line_count: mockTrustPubkeyLineCount,
     message: "Appended (mock)",
   };
+}
+
+/** Simulated host pairing window: open until ~8s elapse (mimics a laptop pairing) or stopped. */
+let mockPairingOpenedAt: number | null = null;
+
+/** Host: opens a pairing window with a fixed demo code. */
+export async function mockStartPairing(): Promise<PairingStarted> {
+  await delay(120);
+  mockPairingOpenedAt = Date.now();
+  return { code: "482913" };
+}
+
+/** Host: closes the pairing window. */
+export async function mockStopPairing(): Promise<void> {
+  await delay(40);
+  mockPairingOpenedAt = null;
+}
+
+/** Host: the window auto-"pairs" ~8s after opening so the panel demos the paired state. */
+export async function mockPairingStatus(): Promise<boolean> {
+  await delay(20);
+  if (mockPairingOpenedAt == null) {
+    return false;
+  }
+  if (Date.now() - mockPairingOpenedAt > 8000) {
+    mockPairingOpenedAt = null; // simulate a laptop having paired
+    mockTrustPubkeyLineCount += 1; // its key is now trusted
+    return false;
+  }
+  return true;
+}
+
+/** Client: two fake hosts in pairing mode. */
+export async function mockDiscoverHosts(): Promise<DiscoveredHost[]> {
+  await delay(600);
+  return [
+    { hostname: "mock-nas", address: "192.168.1.50:8421" },
+    { hostname: "backr-host", address: "192.168.1.77:8421" },
+  ];
+}
+
+/** Client: pretends to pair and returns a prefilled config draft. */
+export async function mockPairWithHost(address: string, code: string): Promise<Config> {
+  void code;
+  await delay(500);
+  const host = address.split(":")[0] ?? "192.168.1.50";
+  const cfg = structuredClone(createInitialMockConfig());
+  cfg.remote.host = host;
+  cfg.remote.user = DEV_MOCK_HOST_SSH_USER;
+  cfg.remote.backup_path = DEV_MOCK_HOST_BACKUP_ROOT;
+  return cfg;
 }

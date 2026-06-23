@@ -7,6 +7,7 @@
   import { KeyRound } from "lucide-svelte";
 
   import * as commands from "../../lib/commands";
+  import PairingPanel from "./PairingPanel.svelte";
   import type { HostTrustAppendResult, HostTrustStatus } from "../../types/hostTrust";
 
   let status = $state<HostTrustStatus | null>(null);
@@ -79,6 +80,14 @@
       (common when running as a desktop user), copy the generated <strong>sudo</strong> commands instead.
     </p>
   </header>
+
+  <PairingPanel />
+
+  <div class="flex items-center gap-3">
+    <span class="h-px flex-1 bg-[var(--border)]"></span>
+    <span class="label-caps text-[var(--muted)]">or paste a key manually</span>
+    <span class="h-px flex-1 bg-[var(--border)]"></span>
+  </div>
 
   {#if loadErr}
     <p class="rounded-[6px] border border-[var(--warn)] bg-[var(--bg4)] px-4 py-3 text-[13px] text-[var(--warn)]">

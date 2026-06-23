@@ -15,6 +15,7 @@ import type {
   HostVolumeSummary,
 } from "../types/hostDashboard";
 import type { HostTrustAppendResult, HostTrustStatus } from "../types/hostTrust";
+import type { DiscoveredHost, PairingStarted } from "../types/pairing";
 import type { ShellBootstrap } from "../types/shellBootstrap";
 import type { SystemInfo } from "../types/systemInfo";
 import * as devMockBackend from "./devMock/backend";
@@ -304,4 +305,66 @@ export async function getActivitySeries(): Promise<ActivityPoint[]> {
     return devMockBackend.mockGetActivitySeries();
   }
   return invoke<ActivityPoint[]>("get_activity_series");
+}
+
+/**
+ * Host: opens a one-tap pairing window (6-digit code + mDNS advertise + listener).
+ *
+ * External: `invoke` → `start_pairing`.
+ */
+export async function startPairing(): Promise<PairingStarted> {
+  if (useDevMock()) {
+    return devMockBackend.mockStartPairing();
+  }
+  return invoke<PairingStarted>("start_pairing");
+}
+
+/**
+ * Host: closes the pairing window if one is open.
+ *
+ * External: `invoke` → `stop_pairing`.
+ */
+export async function stopPairing(): Promise<void> {
+  if (useDevMock()) {
+    await devMockBackend.mockStopPairing();
+    return;
+  }
+  await invoke("stop_pairing");
+}
+
+/**
+ * Host: reports whether a pairing window is currently open.
+ *
+ * External: `invoke` → `pairing_status`.
+ */
+export async function pairingStatus(): Promise<boolean> {
+  if (useDevMock()) {
+    return devMockBackend.mockPairingStatus();
+  }
+  return invoke<boolean>("pairing_status");
+}
+
+/**
+ * Client: browses the LAN for hosts currently in pairing mode.
+ *
+ * External: `invoke` → `discover_hosts`.
+ */
+export async function discoverHosts(): Promise<DiscoveredHost[]> {
+  if (useDevMock()) {
+    return devMockBackend.mockDiscoverHosts();
+  }
+  return invoke<DiscoveredHost[]>("discover_hosts");
+}
+
+/**
+ * Client: pairs with a discovered host using the 6-digit code; returns a prefilled
+ * config draft for the setup wizard.
+ *
+ * External: `invoke` → `pair_with_host`.
+ */
+export async function pairWithHost(address: string, code: string): Promise<Config> {
+  if (useDevMock()) {
+    return devMockBackend.mockPairWithHost(address, code);
+  }
+  return invoke<Config>("pair_with_host", { address, code });
 }
