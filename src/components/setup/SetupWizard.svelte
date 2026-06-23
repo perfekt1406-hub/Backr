@@ -9,11 +9,13 @@
 
   import type { Config } from "../../types/config";
   import { shellKind } from "../../stores/shell";
+  import PairHost from "./PairHost.svelte";
   import StepPaths from "./StepPaths.svelte";
   import StepRemote from "./StepRemote.svelte";
   import StepVerify from "./StepVerify.svelte";
 
   let step = $state(0);
+  let mode = $state<"discover" | "wizard">("discover");
 
   /** Seeds wizard fields until persistence succeeds. */
   function emptyConfig(): Config {
@@ -32,6 +34,19 @@
   }
 
   let draft = $state<Config>(emptyConfig());
+
+  /** Adopts a paired host's prefilled config and jumps to the verify step. */
+  function adoptPairedConfig(cfg: Config): void {
+    draft = cfg;
+    mode = "wizard";
+    step = 2;
+  }
+
+  /** Switches from discovery to manual entry with a blank draft. */
+  function enterManual(): void {
+    mode = "wizard";
+    step = 0;
+  }
 
   onMount(() => {
     if (get(shellKind) === "host") {
@@ -64,6 +79,9 @@
   }
 </script>
 
+{#if mode === "discover"}
+  <PairHost onPaired={adoptPairedConfig} onManual={enterManual} />
+{:else}
 <div class="flex flex-1 flex-col gap-8 px-10 py-10">
   <header class="border-b border-[var(--border)] pb-6">
     <p class="label-caps mb-2 text-[var(--muted)]">Initial setup</p>
@@ -140,3 +158,4 @@
     </div>
   {/if}
 </div>
+{/if}

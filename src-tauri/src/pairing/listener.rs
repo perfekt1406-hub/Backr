@@ -137,10 +137,24 @@ fn json_header() -> tiny_http::Header {
 /// Tokio worker — it uses `blocking_lock`). Returns after one successful pair; the
 /// caller (U4) also tears it down on timeout/cancel by dropping the server.
 pub fn serve(server: Arc<Server>, state: Arc<AppState>, host: HostPairInfo) {
+    let mut paired = false;
     for request in server.incoming_requests() {
         if handle_request(request, &state, &host) {
+            paired = true;
             break;
         }
+    }
+    if paired {
+        // A successful pair closes the window immediately: remove the runtime
+        // (without joining our own thread) and stop advertising. A later TTL
+        // teardown then finds nothing and no-ops.
+        let runtime = state.pairing_runtime.blocking_lock().take();
+        if let Some(rt) = runtime {
+            let _ = rt.mdns.unregister(&rt.fullname);
+            let _ = rt.mdns.shutdown();
+            // rt.server + rt.thread (our own handle) drop here, detaching this thread.
+        }
+        *state.pairing.blocking_lock() = None;
     }
 }
 
