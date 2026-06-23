@@ -10,6 +10,7 @@ pub mod error;
 pub mod host_config;
 pub mod host_disk_inventory;
 pub mod host_trust;
+pub mod pairing;
 pub mod progress_sink;
 pub mod project_snapshot_cache;
 pub mod scheduler;

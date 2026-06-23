@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::pairing::code::PairingSession;
 
 /// Shared application state injected into the Tauri runtime via `tauri::Manager::manage`.
 pub struct AppState {
@@ -26,6 +27,8 @@ pub struct AppState {
     pub scheduler_handle: Mutex<Option<JoinHandle<()>>>,
     /// Token used to stop the current scheduler loop when configuration changes.
     pub scheduler_cancel: Mutex<Option<CancellationToken>>,
+    /// Active one-tap pairing window (host side), or `None` when not pairing.
+    pub pairing: Mutex<Option<PairingSession>>,
 }
 
 impl Default for AppState {
@@ -38,6 +41,7 @@ impl Default for AppState {
             last_backup_at: Mutex::new(None),
             scheduler_handle: Mutex::new(None),
             scheduler_cancel: Mutex::new(None),
+            pairing: Mutex::new(None),
         }
     }
 }
