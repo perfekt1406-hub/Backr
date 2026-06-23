@@ -6,7 +6,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -109,6 +109,58 @@ fn authorized_keys_path() -> Result<(String, PathBuf), String> {
     let home = passwd_home(&ssh_user)?;
     let ak = home.join(".ssh").join("authorized_keys");
     Ok((ssh_user, ak))
+}
+
+/// Absolute path to the privileged helper installed by `setup-backup-host.sh`.
+/// The host app runs as the desktop user, which cannot write the backup user's
+/// `authorized_keys` directly; this helper (invoked via passwordless `sudo -n`)
+/// performs the append as root so one-tap pairing needs no manual key trust.
+const TRUST_HELPER_PATH: &str = "/usr/local/lib/backr/append-trusted-key";
+
+/// Appends `line` to the backup user's `authorized_keys` via the privileged helper.
+///
+/// # Inputs
+///
+/// * `line` — validated OpenSSH public key line.
+///
+/// # Outputs
+///
+/// `Ok(())` when `sudo -n <helper>` exits 0; `Err` with stderr/context otherwise
+/// (helper missing, no passwordless sudo rule, or the append failed).
+fn try_privileged_helper_append(line: &str) -> Result<(), String> {
+    if !Path::new(TRUST_HELPER_PATH).is_file() {
+        return Err(format!("trust helper not installed at {TRUST_HELPER_PATH}"));
+    }
+    // `-n` keeps sudo non-interactive: it fails fast instead of prompting for a
+    // password when the NOPASSWD rule is absent.  The key is piped on stdin so it
+    // never appears in the process list / sudo audit args.
+    let mut child = Command::new("sudo")
+        .args(["-n", TRUST_HELPER_PATH])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run sudo helper: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(format!("{line}\n").as_bytes())
+            .map_err(|e| format!("could not write key to helper: {e}"))?;
+        // Drop stdin to send EOF so the helper's `cat`/read returns.
+    }
+
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("sudo helper did not complete: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "sudo helper failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 /// Builds a short sudo snippet the operator can paste when the GUI user cannot write `authorized_keys`.
@@ -237,64 +289,23 @@ pub fn host_append_authorized_pubkey_impl(pubkey_line: String) -> Result<HostTru
                 message: "Public key added to authorized_keys.".into(),
             })
         }
-        Err(_) => {
-            // Direct write failed — typical when Backr runs as the desktop user but
-            // authorized_keys is owned by the backup system user.  Try the NOPASSWD
-            // sudo tee rule written by the host install script before falling back to
-            // the manual snippet.
-            if sudo_tee_append(&line, &ak_path).is_ok() {
-                let after = std::fs::read_to_string(&ak_path).unwrap_or_else(|_| {
-                    let mut s = existing.clone();
-                    s.push_str(&line);
-                    s.push('\n');
-                    s
-                });
-                return Ok(HostTrustAppendResult {
-                    appended: true,
-                    skipped_duplicate: false,
-                    pubkey_line_count: count_pubkey_lines(&after),
-                    sudo_script: None,
-                    message: "Public key added to authorized_keys.".into(),
-                });
+        // Direct write failed (host app runs as the desktop user, authorized_keys is
+        // owned by the backup user).  Escalate through the privileged helper so pairing
+        // stays hands-off; only when that also fails do we surface the manual snippet.
+        Err(_) => match try_privileged_helper_append(&line) {
+            Ok(()) => Ok(HostTrustAppendResult {
+                appended: true,
+                skipped_duplicate: false,
+                pubkey_line_count: count_existing(&ak_path),
+                sudo_script: None,
+                message: "Public key added to authorized_keys (via privileged helper).".into(),
+            }),
+            Err(helper_err) => {
+                tracing::warn!("trust helper append failed: {helper_err}");
+                sudo_fallback()
             }
-            sudo_fallback()
-        }
+        },
     }
-}
-
-/// Appends `line` to `ak_path` via `sudo tee -a` using the NOPASSWD rule written by
-/// the host install script (`/etc/sudoers.d/backr-trust-keys`).
-///
-/// # Inputs
-///
-/// * `line` — validated pubkey line.
-/// * `ak_path` — absolute path to `authorized_keys`.
-fn sudo_tee_append(line: &str, ak_path: &Path) -> Result<(), String> {
-    let tee = Command::new("which")
-        .arg("tee")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/usr/bin/tee".to_string());
-
-    let mut child = Command::new("sudo")
-        .args([tee.as_str(), "-a", &ak_path.to_string_lossy()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("sudo tee spawn: {e}"))?;
-
-    if let Some(stdin) = child.stdin.as_mut() {
-        writeln!(stdin, "{line}").map_err(|e| format!("sudo tee write: {e}"))?;
-    }
-
-    child
-        .wait()
-        .map_err(|e| e.to_string())
-        .and_then(|s| if s.success() { Ok(()) } else { Err("sudo tee exited non-zero".into()) })
 }
 
 fn count_existing(ak_path: &Path) -> usize {

@@ -591,26 +591,103 @@ ensure_ssh_dir() {
     run_cmd chmod 600 "${home_dir}/.ssh/authorized_keys"
   fi
 
-  # Write a NOPASSWD sudoers drop-in so the Backr host-dashboard app (running as the
-  # desktop user) can append client public keys during one-tap pairing without an
-  # interactive password prompt.  The rule is tightly scoped: only "sudo tee -a
-  # <authorized_keys_path>" is permitted, nothing else.
-  local du tee_bin ak_path sudoers_drop_in
-  du="$(detect_desktop_user 2>/dev/null)" || return 0
-  tee_bin="$(command -v tee 2>/dev/null || echo /usr/bin/tee)"
-  ak_path="${home_dir}/.ssh/authorized_keys"
-  sudoers_drop_in="/etc/sudoers.d/backr-trust-keys"
+  # The Backr host app runs as the desktop user, which cannot write this
+  # backup-user-owned authorized_keys directly.  Install a privileged helper +
+  # passwordless-sudo rule so one-tap pairing can trust laptop keys with no manual
+  # step (replaces the old POSIX-ACL approach, which depended on filesystem ACL
+  # support and exact user/path matching and proved unreliable).
+  install_trust_helper
+}
+
+#
+# Inputs: globals BACKR_USER; uses detect_desktop_user for the sudoers principal.
+# Outputs: installs /usr/local/lib/backr/append-trusted-key (root:root 0755) and a
+#          NOPASSWD sudoers drop-in so the desktop user can append client pubkeys to
+#          ~BACKR_USER/.ssh/authorized_keys as root during pairing.  No-op in dry-run.
+# External: visudo -cf validates the drop-in before it is trusted (inputs: file; outputs: exit status).
+#
+install_trust_helper() {
+  local helper_dir="/usr/local/lib/backr"
+  local helper="${helper_dir}/append-trusted-key"
+  local sudoers="/etc/sudoers.d/10-backr-trust"
+  local du
+  du="$(detect_desktop_user 2>/dev/null)" || {
+    echo "warning: no desktop user detected — pairing will fall back to the manual sudo snippet." >&2
+    return 0
+  }
+
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "[dry-run] write ${sudoers_drop_in} (NOPASSWD tee -a for ${du})"
-  else
-    cat > "$sudoers_drop_in" <<EOF
-# Allows the Backr desktop app to append SSH public keys for the ${BACKR_USER} backup
-# account during one-tap pairing.  Written by setup-backup-host.sh.
-${du} ALL=(root) NOPASSWD: ${tee_bin} -a ${ak_path}
-EOF
-    chmod 440 "$sudoers_drop_in"
-    echo "Sudoers rule written: ${du} can run 'sudo tee -a ${ak_path}' without a password (pairing flow)."
+    echo "[dry-run] install ${helper} + ${sudoers} (NOPASSWD for ${du})"
+    return 0
   fi
+
+  mkdir -p "$helper_dir"
+  # Quoted heredoc: nothing expands at install time — the helper resolves the
+  # backup user (from /etc/backr/host.toml) and home dir at run time on the host.
+  cat >"$helper" <<'HELPER_EOF'
+#!/usr/bin/env bash
+#
+# Backr privileged trust helper.  Reads one OpenSSH public key line from stdin and
+# appends it to the backup user's authorized_keys as root.  Invoked by the Backr
+# host app via passwordless `sudo -n` so one-tap pairing trusts laptop keys without
+# an interactive prompt.  Installed by setup-backup-host.sh.
+#
+set -euo pipefail
+
+marker="/etc/backr/host.toml"
+ssh_user="backr"
+if [[ -r "$marker" ]]; then
+  v="$(sed -n 's/^[[:space:]]*ssh_user[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$marker" | head -n1)"
+  [[ -n "$v" ]] && ssh_user="$v"
+fi
+
+home="$(getent passwd "$ssh_user" | cut -d: -f6)"
+[[ -n "$home" ]] || { echo "no home for ${ssh_user}" >&2; exit 2; }
+
+# First non-empty, whitespace-trimmed line from stdin is the candidate key.
+key=""
+while IFS= read -r line; do
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [[ -n "$line" ]] && { key="$line"; break; }
+done
+[[ -n "$key" ]] || { echo "empty key" >&2; exit 3; }
+
+case "$key" in
+  ssh-rsa\ *|ssh-ed25519\ *|ssh-dss\ *|\
+  ecdsa-sha2-nistp256\ *|ecdsa-sha2-nistp384\ *|ecdsa-sha2-nistp521\ *|\
+  sk-ssh-ed25519@openssh.com\ *|sk-ecdsa-sha2-nistp256@openssh.com\ *) ;;
+  *) echo "not a valid OpenSSH public key line" >&2; exit 4 ;;
+esac
+
+ak="${home}/.ssh/authorized_keys"
+install -d -m 700 -o "$ssh_user" -g "$ssh_user" "${home}/.ssh"
+touch "$ak"
+if grep -Fxq -- "$key" "$ak" 2>/dev/null; then
+  chown "${ssh_user}:${ssh_user}" "$ak"; chmod 600 "$ak"
+  echo "already present"; exit 0
+fi
+printf '%s\n' "$key" >>"$ak"
+chown "${ssh_user}:${ssh_user}" "$ak"
+chmod 600 "$ak"
+echo "appended"
+HELPER_EOF
+  chmod 755 "$helper"
+  chown root:root "$helper"
+
+  # NOPASSWD sudoers rule scoped to exactly this helper.  Validate before trusting:
+  # an invalid drop-in can lock sudo out, so write to a temp file, syntax-check with
+  # visudo, and only then move it into place with the required 0440 perms.
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s ALL=(root) NOPASSWD: %s\n' "$du" "$helper" >"$tmp"
+  if visudo -cf "$tmp" &>/dev/null; then
+    install -m 0440 -o root -g root "$tmp" "$sudoers"
+    echo "Installed trust helper + NOPASSWD rule for ${du} (one-tap pairing writes keys as root)."
+  else
+    echo "warning: generated sudoers rule failed validation — pairing will fall back to the manual sudo snippet." >&2
+  fi
+  rm -f "$tmp"
 }
 
 #
