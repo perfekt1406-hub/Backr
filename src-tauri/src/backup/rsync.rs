@@ -83,6 +83,14 @@ pub async fn rsync_backup_snapshot(
     cmd.arg("--delete");
     cmd.arg("--info=progress2");
     cmd.arg("--human-readable");
+    // Skip regenerable build output, dependency dirs, tool caches, and OS cruft so
+    // snapshots stay small. `--delete` is paired with `--delete-excluded` so that a
+    // path which becomes excluded later (e.g. after this list grows) is also pruned
+    // from the remote snapshot instead of lingering forever.
+    for pattern in crate::backup::excludes::BACKUP_EXCLUDES {
+        cmd.arg("--exclude").arg(pattern);
+    }
+    cmd.arg("--delete-excluded");
     cmd.arg("-e").arg(&rsh);
     if let Some(prev) = link_dest_remote {
         cmd.arg(format!("--link-dest={prev}"));
