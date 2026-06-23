@@ -1550,10 +1550,7 @@ EOF
   fi
   cat <<EOF
 
-On each laptop — clone the Backr repo and run:
-  ./scripts/setup-connecting-client.sh
-The wizard will ask for this machine's IP (${ip_line:-see Primary IP above}) and SSH port.
-It handles deps, AppImage install, and key trust (ssh-copy-id) automatically.
+  → Open Backr and use «Trust keys → Add a laptop» to connect a laptop in one tap.
 
 EOF
 }
@@ -1591,9 +1588,7 @@ main() {
   fi
 
   verify_backup_host_ready
-  report_detected_ssh_environment
   print_host_ready
-  emit_backup_host_custom_next_steps
 }
 
 main "$@"

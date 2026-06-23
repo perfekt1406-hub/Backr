@@ -838,11 +838,8 @@ find_built_appimage_path() {
 print_install_done() {
   cat <<EOF
 
-── Backr installed ──
-  App menu / grid: open Activities (GNOME), the KDE launcher, or your panel app menu — search «Backr».
-  Note: store-style «App Center» catalogs (Snap/Flatpak/Shop) only list published packages; this install uses the standard Linux .desktop + icon theme so the app appears like any other user app.
-  Installed under:  ~/.local/share/backr/
-  Uninstall later:  ./scripts/setup-connecting-client.sh --uninstall
+✓ Backr installed. Open it from your app menu (search «Backr») — it will find your
+  backup host and pair automatically. (Uninstall later: --uninstall.)
 
 EOF
 }
@@ -1219,7 +1216,6 @@ main() {
   esac
 
   verify_pubkey_ssh_or_print_bootstrap_line
-  emit_connecting_client_custom_next_steps
 }
 
 main "$@"
