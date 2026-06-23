@@ -10,6 +10,9 @@
 
   import * as commands from "../../lib/commands";
 
+  /** When embedded in the host setup guide, drop the card's own heading/icon/intro. */
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   let broadcasting = $state(false);
   let code = $state<string | null>(null);
   let busy = $state(false);
@@ -73,12 +76,16 @@
 
 <section class="rounded-[8px] border border-[var(--border)] bg-[var(--bg2)] px-5 py-5 panel-plate">
   <div class="flex items-start gap-3">
-    <Laptop size={22} class="mt-0.5 text-[var(--accent)]" aria-hidden="true" />
+    {#if !embedded}
+      <Laptop size={22} class="mt-0.5 text-[var(--accent)]" aria-hidden="true" />
+    {/if}
     <div class="flex-1">
-      <h2 class="text-[15px] font-semibold text-[var(--text)]">Add a laptop</h2>
-      <p class="mt-1 text-[12px] leading-relaxed text-[var(--muted2)]">
-        Start broadcasting, then on the laptop pick this host and enter the code. Pairing ends automatically once a laptop connects.
-      </p>
+      {#if !embedded}
+        <h2 class="text-[15px] font-semibold text-[var(--text)]">Add a laptop</h2>
+        <p class="mt-1 text-[12px] leading-relaxed text-[var(--muted2)]">
+          Start broadcasting, then on the laptop pick this host and enter the code. Pairing ends automatically once a laptop connects.
+        </p>
+      {/if}
 
       {#if broadcasting && code}
         <div class="mt-4 flex flex-wrap items-center gap-4">

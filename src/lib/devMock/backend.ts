@@ -417,6 +417,7 @@ export async function mockPairingStatus(): Promise<boolean> {
   }
   if (Date.now() - mockPairingOpenedAt > 8000) {
     mockPairingOpenedAt = null; // simulate a laptop having paired
+    mockTrustPubkeyLineCount += 1; // its key is now trusted
     return false;
   }
   return true;
