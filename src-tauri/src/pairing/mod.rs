@@ -7,6 +7,7 @@
  * `commands/pairing_cmd.rs`.
  */
 
+pub mod client;
 pub mod code;
 pub mod discovery;
 pub mod listener;

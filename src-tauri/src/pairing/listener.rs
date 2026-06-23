@@ -36,7 +36,10 @@ pub struct HostPairInfo {
     pub ssh_user: String,
     pub ssh_port: u16,
     pub backup_root: String,
+    /// SHA256 fingerprint for display/verification.
     pub host_key_fingerprint: String,
+    /// Full SSH host public key line the client pins into known_hosts.
+    pub host_pubkey: String,
 }
 
 /// Why a pair attempt was refused.
@@ -85,7 +88,16 @@ pub fn gather_host_info() -> Result<HostPairInfo, String> {
         ssh_port: effective_sshd_port().unwrap_or(22),
         backup_root: marker.backup_root,
         host_key_fingerprint: host_key_fingerprint().unwrap_or_default(),
+        host_pubkey: host_pubkey_line().unwrap_or_default(),
     })
+}
+
+/// Full SSH host public key line (for the client to pin into known_hosts).
+fn host_pubkey_line() -> Option<String> {
+    std::fs::read_to_string("/etc/ssh/ssh_host_ed25519_key.pub")
+        .ok()
+        .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+        .filter(|s| !s.is_empty())
 }
 
 /// Best-effort effective sshd port via `sshd -T` (caller falls back to 22).
@@ -197,6 +209,7 @@ mod tests {
             ssh_port: 22,
             backup_root: "/srv/backr".into(),
             host_key_fingerprint: "SHA256:abc".into(),
+            host_pubkey: "ssh-ed25519 AAAAHOSTKEY host".into(),
         }
     }
 

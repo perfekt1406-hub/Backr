@@ -13,8 +13,10 @@ use std::time::Duration;
 use tauri::State;
 use tiny_http::Server;
 
+use crate::config::Config;
+use crate::pairing::client::pair_with_host as do_pair_with_host;
 use crate::pairing::code::{PairingSession, PAIRING_TTL_SECS};
-use crate::pairing::discovery::advertise;
+use crate::pairing::discovery::{advertise, discover_hosts as do_discover_hosts, DiscoveredHost};
 use crate::pairing::listener::{gather_host_info, serve};
 use crate::pairing::PairingRuntime;
 use crate::state::AppState;
@@ -87,6 +89,23 @@ pub async fn stop_pairing(state: State<'_, Arc<AppState>>) -> Result<(), String>
 #[tauri::command]
 pub async fn pairing_status(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     Ok(state.inner().pairing_runtime.lock().await.is_some())
+}
+
+/// Browses the LAN for hosts currently in pairing mode (~2.5s window).
+#[tauri::command]
+pub async fn discover_hosts() -> Result<Vec<DiscoveredHost>, String> {
+    tokio::task::spawn_blocking(|| do_discover_hosts(Duration::from_millis(2500)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Pairs this laptop with a discovered host using the 6-digit code; returns a
+/// prefilled config draft for the setup wizard.
+#[tauri::command]
+pub async fn pair_with_host(address: String, code: String) -> Result<Config, String> {
+    tokio::task::spawn_blocking(move || do_pair_with_host(&address, &code))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Tears down any active pairing runtime and clears the session.
