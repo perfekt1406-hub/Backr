@@ -52,6 +52,17 @@ let activityHistory: ActivityPoint[] = [...seedActivityPoints()];
 /** Simulated authorized_keys line count for host Trust-keys IPC mocks. */
 let mockTrustPubkeyLineCount = 0;
 
+/** When true, the host dashboard mock reports no snapshots (first-run / not-paired preview). */
+let mockHostFirstRun = false;
+
+/** Dev switcher toggles the host first-run (no backups, not paired) preview state. */
+export function setMockHostFirstRun(firstRun: boolean): void {
+  mockHostFirstRun = firstRun;
+  if (firstRun) {
+    mockTrustPubkeyLineCount = 0; // show the un-paired state
+  }
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -281,6 +292,9 @@ export async function mockResolveShellBootstrap(): Promise<ShellBootstrap> {
  */
 export async function mockHostListSnapshotProjects(): Promise<HostProjectRow[]> {
   await delay(30);
+  if (mockHostFirstRun) {
+    return []; // first-run preview → HostDashboardView shows HostSetupGuide
+  }
   const orderedSnaps = [...MOCK_SNAPSHOT_NAMES].sort((a, b) => b.localeCompare(a));
   const recentForCount = (n: number): string[] =>
     n <= 0 ? [] : orderedSnaps.slice(0, Math.min(3, orderedSnaps.length));

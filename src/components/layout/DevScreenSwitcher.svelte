@@ -12,18 +12,22 @@
     DEV_MOCK_HOST_SSH_USER,
     setDevShellKindPreference,
   } from "../../lib/devShellPreference";
+  import { setMockHostFirstRun } from "../../lib/devMock/backend";
   import { hostDashboardRoot, hostSshUser, shellKind } from "../../stores/shell";
 
   interface Screen {
     label: string;
     kind: "client" | "setup" | "host";
     route: string;
+    /** Host only: report no backups so the first-run setup guide shows. */
+    firstRun?: boolean;
   }
 
   const screens: Screen[] = [
     { label: "Client · Setup / Pair", kind: "setup", route: "/setup" },
     { label: "Client · Dashboard", kind: "client", route: "/" },
-    { label: "Host · Dashboard", kind: "host", route: "/host" },
+    { label: "Host · First run (not paired)", kind: "host", route: "/host", firstRun: true },
+    { label: "Host · Dashboard (with backups)", kind: "host", route: "/host" },
     { label: "Host · Trust keys (pairing)", kind: "host", route: "/host/trust" },
   ];
 
@@ -34,6 +38,7 @@
     const s = screens.find((x) => x.label === label);
     if (!s) return;
     current = label;
+    setMockHostFirstRun(s.kind === "host" && (s.firstRun ?? false));
     if (s.kind === "host") {
       hostDashboardRoot.set(DEV_MOCK_HOST_BACKUP_ROOT);
       hostSshUser.set(DEV_MOCK_HOST_SSH_USER);
