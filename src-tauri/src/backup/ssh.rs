@@ -1,17 +1,44 @@
 /*
  * Remote helpers that invoke local `ssh` to list snapshots/files and verify connectivity.
- * Uses `tokio::process::Command` with separate arguments so paths may contain spaces safely.
+ * OpenSSH joins the remote argv with spaces and runs the result through the remote login
+ * shell (`sh -c "…"`), so each remote token is single-quote escaped via `join_remote_command`
+ * before being sent — otherwise a path with spaces or shell metacharacters (e.g. a project
+ * folder named `Submissions (Copy)`) is mis-parsed remotely.
  * `find -printf` record output uses ASCII RS/US delimiters: newlines/tabs must not appear in argv
- * tokens because OpenSSH runs the remote command through the login shell, which truncates them.
+ * tokens because the remote login shell truncates them.
  */
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use shell_escape::escape;
 use tokio::process::Command;
 
 use crate::error::BackrError;
+
+/// Joins remote argv tokens into a single shell-safe command string for OpenSSH.
+///
+/// OpenSSH concatenates the remote arguments with spaces and runs the result through the
+/// remote login shell, so any token containing spaces, parentheses, or other shell
+/// metacharacters would be mis-parsed remotely. Each token is single-quote escaped so the
+/// remote shell reconstructs the exact intended argv.
+///
+/// # Inputs
+///
+/// * `remote_argv` — command followed by its arguments to run on the remote host.
+///
+/// # Returns
+///
+/// A single shell-escaped command line to pass as one `ssh` argument.
+fn join_remote_command(remote_argv: &[String]) -> String {
+    remote_argv
+        .iter()
+        .map(|a| escape(Cow::Borrowed(a.as_str())).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Snapshot directory names must match this pattern (YYYY-MM-DD_HH-MM-SS).
 static SNAPSHOT_NAME_RE: Lazy<Regex> = Lazy::new(|| {
@@ -123,9 +150,7 @@ pub async fn ssh_exec_trimmed(
 ) -> Result<String, BackrError> {
     let mut cmd = ssh_base_command(ssh_key, known_hosts, accept_new, ssh_port);
     cmd.arg(format!("{user}@{host}"));
-    for a in remote_argv {
-        cmd.arg(a);
-    }
+    cmd.arg(join_remote_command(remote_argv));
     run_and_capture(cmd).await
 }
 
@@ -173,9 +198,7 @@ pub async fn remote_read_file_bytes(
     ];
     let mut cmd = ssh_base_command(ssh_key, known_hosts, true, ssh_port);
     cmd.arg(format!("{user}@{host}"));
-    for a in &argv {
-        cmd.arg(a);
-    }
+    cmd.arg(join_remote_command(&argv));
     run_and_capture_stdout_exact(cmd).await
 }
 

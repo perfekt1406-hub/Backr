@@ -83,6 +83,10 @@ pub async fn rsync_backup_snapshot(
     cmd.arg("--delete");
     cmd.arg("--info=progress2");
     cmd.arg("--human-readable");
+    // Send remote paths via the rsync protocol instead of the remote shell command line
+    // so paths with spaces or shell metacharacters (e.g. a project folder named
+    // `Submissions (Copy)`) are not re-split remotely. Covers the dest URL and --link-dest.
+    cmd.arg("--protect-args");
     // Skip regenerable build output, dependency dirs, tool caches, and OS cruft so
     // snapshots stay small. `--delete` is paired with `--delete-excluded` so that a
     // path which becomes excluded later (e.g. after this list grows) is also pruned
@@ -127,6 +131,8 @@ pub async fn rsync_restore_snapshot(
     cmd.arg("--archive");
     cmd.arg("--info=progress2");
     cmd.arg("--human-readable");
+    // Same remote-path protection as backup — the source URL may contain spaces/metachars.
+    cmd.arg("--protect-args");
     cmd.arg("-e").arg(&rsh);
     let mut remote_with_slash = remote_snapshot_url.to_string();
     if !remote_with_slash.ends_with('/') {
