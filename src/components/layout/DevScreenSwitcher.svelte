@@ -1,7 +1,7 @@
 <!--
   Purpose: Dev-only screen switcher for browser mock previews — jump between the
-  client setup/pair flow, client dashboard, host dashboard, and host trust/pairing
-  screens without real backend state.
+  client setup/pair flow, client dashboard, host dashboard, and settings screens without real
+  backend state.
   Role: Rendered by App.svelte only when devShellToggleEnabled() (VITE_BACKR_MOCK + dev).
 -->
 <script lang="ts">
@@ -26,9 +26,10 @@
   const screens: Screen[] = [
     { label: "Client · Setup / Pair", kind: "setup", route: "/setup" },
     { label: "Client · Dashboard", kind: "client", route: "/" },
-    { label: "Host · First run (not paired)", kind: "host", route: "/host", firstRun: true },
-    { label: "Host · Dashboard (with backups)", kind: "host", route: "/host" },
-    { label: "Host · Trust keys (pairing)", kind: "host", route: "/host/trust" },
+    { label: "Client · Settings", kind: "client", route: "/settings" },
+    { label: "Host · First run (not paired)", kind: "host", route: "/host/firstrun", firstRun: true },
+    { label: "Host · Dashboard (with backups)", kind: "host", route: "/host/dashboard" },
+    { label: "Host · Settings", kind: "host", route: "/host/settings" },
   ];
 
   let current = $state(screens[0].label);

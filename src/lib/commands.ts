@@ -14,7 +14,7 @@ import type {
   HostProjectRow,
   HostVolumeSummary,
 } from "../types/hostDashboard";
-import type { HostTrustAppendResult, HostTrustStatus } from "../types/hostTrust";
+import type { AuthorizedPubkeyEntry, HostRemovePubkeyResult, HostTrustAppendResult, HostTrustStatus } from "../types/hostTrust";
 import type { DiscoveredHost, PairingStarted } from "../types/pairing";
 import type { ShellBootstrap } from "../types/shellBootstrap";
 import type { SystemInfo } from "../types/systemInfo";
@@ -87,6 +87,30 @@ export async function hostTrustStatus(): Promise<HostTrustStatus> {
     return devMockBackend.mockHostTrustStatus();
   }
   return invoke<HostTrustStatus>("host_trust_status");
+}
+
+/**
+ * Lists all parsed pubkey entries in authorized_keys for the host Settings trusted-keys panel.
+ *
+ * External: `invoke` → `host_list_authorized_pubkeys`.
+ */
+export async function hostListAuthorizedPubkeys(): Promise<AuthorizedPubkeyEntry[]> {
+  if (useDevMock()) {
+    return devMockBackend.mockHostListAuthorizedPubkeys();
+  }
+  return invoke<AuthorizedPubkeyEntry[]>("host_list_authorized_pubkeys");
+}
+
+/**
+ * Removes the pubkey line matching `rawLine` exactly from authorized_keys.
+ *
+ * External: `invoke` → `host_remove_authorized_pubkey`.
+ */
+export async function hostRemoveAuthorizedPubkey(rawLine: string): Promise<HostRemovePubkeyResult> {
+  if (useDevMock()) {
+    return devMockBackend.mockHostRemoveAuthorizedPubkey(rawLine);
+  }
+  return invoke<HostRemovePubkeyResult>("host_remove_authorized_pubkey", { rawLine });
 }
 
 /**

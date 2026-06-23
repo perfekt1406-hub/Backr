@@ -122,6 +122,8 @@ pub fn run() {
             commands::host_cmd::host_disk_inventory,
             commands::host_cmd::host_trust_status,
             commands::host_cmd::host_append_authorized_pubkey,
+            commands::host_cmd::host_list_authorized_pubkeys,
+            commands::host_cmd::host_remove_authorized_pubkey,
             commands::pairing_cmd::start_pairing,
             commands::pairing_cmd::stop_pairing,
             commands::pairing_cmd::pairing_status,
