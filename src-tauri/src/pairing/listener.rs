@@ -10,7 +10,6 @@
  * request logic and the blocking serve loop.
  */
 
-use std::io::Read;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -125,7 +124,7 @@ fn json_header() -> tiny_http::Header {
 /// Blocking serve loop for the pairing window. Runs on a dedicated OS thread (never a
 /// Tokio worker — it uses `blocking_lock`). Returns after one successful pair; the
 /// caller (U4) also tears it down on timeout/cancel by dropping the server.
-pub fn serve(server: Server, state: Arc<AppState>, host: HostPairInfo) {
+pub fn serve(server: Arc<Server>, state: Arc<AppState>, host: HostPairInfo) {
     for request in server.incoming_requests() {
         if handle_request(request, &state, &host) {
             break;

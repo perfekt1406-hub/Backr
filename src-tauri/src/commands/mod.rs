@@ -7,6 +7,7 @@ pub mod activity_cmd;
 pub mod backup_cmd;
 pub mod config_cmd;
 pub mod host_cmd;
+pub mod pairing_cmd;
 pub mod project_cmd;
 pub mod snapshot_cmd;
 pub mod system_cmd;

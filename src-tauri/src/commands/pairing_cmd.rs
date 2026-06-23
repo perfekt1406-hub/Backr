@@ -1,0 +1,99 @@
+/*
+ * Host-side pairing commands.
+ *
+ * `start_pairing` opens a time-boxed window: generates a 6-digit code, binds an
+ * ephemeral pairing listener, advertises this host over mDNS, and auto-tears down
+ * after the TTL. `stop_pairing` / `pairing_status` manage and report that window.
+ */
+
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use tauri::State;
+use tiny_http::Server;
+
+use crate::pairing::code::{PairingSession, PAIRING_TTL_SECS};
+use crate::pairing::discovery::advertise;
+use crate::pairing::listener::{gather_host_info, serve};
+use crate::pairing::PairingRuntime;
+use crate::state::AppState;
+
+/// Returned to the host UI when a pairing window opens.
+#[derive(serde::Serialize)]
+pub struct PairingStarted {
+    /// 6-digit code to show on the host.
+    pub code: String,
+    /// RFC3339 expiry for the UI countdown.
+    pub expires_at: String,
+}
+
+/// Opens a pairing window (code + mDNS advertise + listener), auto-closing after the TTL.
+#[tauri::command]
+pub async fn start_pairing(state: State<'_, Arc<AppState>>) -> Result<PairingStarted, String> {
+    let app = state.inner().clone();
+    // Replace any prior window.
+    stop_pairing_internal(&app).await;
+
+    let host = gather_host_info()?;
+    let session = PairingSession::new();
+    let code = session.code().to_string();
+    let expires_at = session.expires_at.to_rfc3339();
+
+    // Bind the listener on an ephemeral port, then advertise that exact port.
+    let server = Server::http("0.0.0.0:0").map_err(|e| e.to_string())?;
+    let port = server
+        .server_addr()
+        .to_ip()
+        .map(|addr| addr.port())
+        .ok_or_else(|| "could not resolve pairing listener port".to_string())?;
+    let server = Arc::new(server);
+
+    let (mdns, fullname) = advertise(port)?;
+
+    *app.pairing.lock().await = Some(session);
+
+    // Serve runs on a dedicated OS thread (it uses blocking_lock).
+    let serve_app = app.clone();
+    let serve_server = server.clone();
+    let serve_host = host.clone();
+    let handle = thread::spawn(move || serve(serve_server, serve_app, serve_host));
+
+    *app.pairing_runtime.lock().await = Some(PairingRuntime {
+        mdns,
+        fullname,
+        server,
+        thread: Some(handle),
+    });
+
+    // Auto-teardown when the window elapses.
+    let ttl_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(PAIRING_TTL_SECS as u64)).await;
+        stop_pairing_internal(&ttl_app).await;
+    });
+
+    Ok(PairingStarted { code, expires_at })
+}
+
+/// Closes the pairing window if one is open.
+#[tauri::command]
+pub async fn stop_pairing(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    stop_pairing_internal(state.inner()).await;
+    Ok(())
+}
+
+/// True while a pairing window is open.
+#[tauri::command]
+pub async fn pairing_status(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    Ok(state.inner().pairing_runtime.lock().await.is_some())
+}
+
+/// Tears down any active pairing runtime and clears the session.
+async fn stop_pairing_internal(app: &AppState) {
+    let rt = app.pairing_runtime.lock().await.take();
+    if let Some(rt) = rt {
+        rt.shutdown();
+    }
+    *app.pairing.lock().await = None;
+}
