@@ -6,7 +6,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -237,8 +237,64 @@ pub fn host_append_authorized_pubkey_impl(pubkey_line: String) -> Result<HostTru
                 message: "Public key added to authorized_keys.".into(),
             })
         }
-        Err(_) => sudo_fallback(),
+        Err(_) => {
+            // Direct write failed — typical when Backr runs as the desktop user but
+            // authorized_keys is owned by the backup system user.  Try the NOPASSWD
+            // sudo tee rule written by the host install script before falling back to
+            // the manual snippet.
+            if sudo_tee_append(&line, &ak_path).is_ok() {
+                let after = std::fs::read_to_string(&ak_path).unwrap_or_else(|_| {
+                    let mut s = existing.clone();
+                    s.push_str(&line);
+                    s.push('\n');
+                    s
+                });
+                return Ok(HostTrustAppendResult {
+                    appended: true,
+                    skipped_duplicate: false,
+                    pubkey_line_count: count_pubkey_lines(&after),
+                    sudo_script: None,
+                    message: "Public key added to authorized_keys.".into(),
+                });
+            }
+            sudo_fallback()
+        }
     }
+}
+
+/// Appends `line` to `ak_path` via `sudo tee -a` using the NOPASSWD rule written by
+/// the host install script (`/etc/sudoers.d/backr-trust-keys`).
+///
+/// # Inputs
+///
+/// * `line` — validated pubkey line.
+/// * `ak_path` — absolute path to `authorized_keys`.
+fn sudo_tee_append(line: &str, ak_path: &Path) -> Result<(), String> {
+    let tee = Command::new("which")
+        .arg("tee")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/usr/bin/tee".to_string());
+
+    let mut child = Command::new("sudo")
+        .args([tee.as_str(), "-a", &ak_path.to_string_lossy()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("sudo tee spawn: {e}"))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        writeln!(stdin, "{line}").map_err(|e| format!("sudo tee write: {e}"))?;
+    }
+
+    child
+        .wait()
+        .map_err(|e| e.to_string())
+        .and_then(|s| if s.success() { Ok(()) } else { Err("sudo tee exited non-zero".into()) })
 }
 
 fn count_existing(ak_path: &Path) -> usize {

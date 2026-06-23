@@ -591,18 +591,25 @@ ensure_ssh_dir() {
     run_cmd chmod 600 "${home_dir}/.ssh/authorized_keys"
   fi
 
-  # Grant the desktop user (who runs the Backr host-dashboard app) write access to
-  # authorized_keys via POSIX ACL so the one-tap pairing flow can add client keys
-  # without requiring an interactive sudo prompt.  OpenSSH StrictModes checks mode
-  # bits only, not ACL entries, so this does not break SSH login.
-  local du
+  # Write a NOPASSWD sudoers drop-in so the Backr host-dashboard app (running as the
+  # desktop user) can append client public keys during one-tap pairing without an
+  # interactive password prompt.  The rule is tightly scoped: only "sudo tee -a
+  # <authorized_keys_path>" is permitted, nothing else.
+  local du tee_bin ak_path sudoers_drop_in
   du="$(detect_desktop_user 2>/dev/null)" || return 0
-  if command -v setfacl &>/dev/null; then
-    run_cmd setfacl -m "u:${du}:rwx" "${home_dir}/.ssh"
-    run_cmd setfacl -m "u:${du}:rw"  "${home_dir}/.ssh/authorized_keys"
-    echo "ACL granted: ${du} can write ${home_dir}/.ssh/authorized_keys (pairing flow)."
+  tee_bin="$(command -v tee 2>/dev/null || echo /usr/bin/tee)"
+  ak_path="${home_dir}/.ssh/authorized_keys"
+  sudoers_drop_in="/etc/sudoers.d/backr-trust-keys"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] write ${sudoers_drop_in} (NOPASSWD tee -a for ${du})"
   else
-    echo "warning: setfacl not available — the Backr pairing flow will fall back to the manual sudo snippet." >&2
+    cat > "$sudoers_drop_in" <<EOF
+# Allows the Backr desktop app to append SSH public keys for the ${BACKR_USER} backup
+# account during one-tap pairing.  Written by setup-backup-host.sh.
+${du} ALL=(root) NOPASSWD: ${tee_bin} -a ${ak_path}
+EOF
+    chmod 440 "$sudoers_drop_in"
+    echo "Sudoers rule written: ${du} can run 'sudo tee -a ${ak_path}' without a password (pairing flow)."
   fi
 }
 
