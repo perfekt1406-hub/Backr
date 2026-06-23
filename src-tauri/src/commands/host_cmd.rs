@@ -287,3 +287,21 @@ pub fn host_append_authorized_pubkey(
 ) -> Result<crate::host_trust::HostTrustAppendResult, String> {
     crate::host_trust::host_append_authorized_pubkey_impl(pubkey_line)
 }
+
+/// Lists every parsed pubkey entry in authorized_keys for the host Settings trusted-keys list.
+///
+/// External: delegates to [`crate::host_trust::host_list_authorized_pubkeys_impl`] (inputs: none; outputs: Vec<[`crate::host_trust::AuthorizedPubkeyEntry`]>).
+#[tauri::command]
+pub fn host_list_authorized_pubkeys() -> Result<Vec<crate::host_trust::AuthorizedPubkeyEntry>, String> {
+    crate::host_trust::host_list_authorized_pubkeys_impl()
+}
+
+/// Removes one pubkey line (identified by exact raw_line match) from authorized_keys.
+///
+/// External: delegates to [`crate::host_trust::host_remove_authorized_pubkey_impl`] (inputs: raw_line; outputs: [`crate::host_trust::HostRemovePubkeyResult`]).
+#[tauri::command]
+pub fn host_remove_authorized_pubkey(
+    raw_line: String,
+) -> Result<crate::host_trust::HostRemovePubkeyResult, String> {
+    crate::host_trust::host_remove_authorized_pubkey_impl(raw_line)
+}

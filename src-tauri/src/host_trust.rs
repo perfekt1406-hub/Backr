@@ -249,3 +249,113 @@ fn count_existing(ak_path: &Path) -> usize {
         .map(|s| count_pubkey_lines(&s))
         .unwrap_or(0)
 }
+
+/// One parsed entry from `authorized_keys`, suitable for the host Settings key list.
+#[derive(Debug, Serialize)]
+pub struct AuthorizedPubkeyEntry {
+    /// OpenSSH key type token, e.g. `ssh-ed25519`.
+    pub key_type: String,
+    /// Base-64 key material (middle column).
+    pub key_b64: String,
+    /// Optional trailing comment, typically `user@machine`.
+    pub comment: String,
+    /// The full raw line from the file — used as the stable identity when removing.
+    pub raw_line: String,
+}
+
+/// Result of removing one pubkey entry from `authorized_keys`.
+#[derive(Debug, Serialize)]
+pub struct HostRemovePubkeyResult {
+    /// True when the line was found and removed.
+    pub removed: bool,
+    /// Number of remaining pubkey lines after the operation.
+    pub pubkey_line_count: u32,
+}
+
+/// Parses all valid pubkey lines from `authorized_keys` content into structured entries.
+///
+/// # Inputs
+///
+/// * `content` — full text of the `authorized_keys` file.
+fn parse_pubkey_entries(content: &str) -> Vec<AuthorizedPubkeyEntry> {
+    content
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            if t.is_empty() || t.starts_with('#') {
+                return None;
+            }
+            if validate_pubkey_line(t).is_err() {
+                return None;
+            }
+            let mut parts = t.splitn(3, ' ');
+            let key_type = parts.next()?.to_string();
+            let key_b64 = parts.next()?.to_string();
+            let comment = parts.next().unwrap_or("").trim().to_string();
+            Some(AuthorizedPubkeyEntry {
+                key_type,
+                key_b64,
+                comment,
+                raw_line: t.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Lists every parsed pubkey entry in `authorized_keys` for the host Settings view.
+///
+/// # Outputs
+///
+/// Vec of [`AuthorizedPubkeyEntry`] (empty when the file is absent or has no valid keys).
+pub fn host_list_authorized_pubkeys_impl() -> Result<Vec<AuthorizedPubkeyEntry>, String> {
+    let (_ssh_user, ak_path) = authorized_keys_path()?;
+    let content = if ak_path.is_file() {
+        std::fs::read_to_string(&ak_path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+    Ok(parse_pubkey_entries(&content))
+}
+
+/// Removes the line matching `raw_line` exactly from `authorized_keys`.
+///
+/// # Inputs
+///
+/// * `raw_line` — the exact full line string returned by [`host_list_authorized_pubkeys_impl`].
+///
+/// # Outputs
+///
+/// [`HostRemovePubkeyResult`] indicating whether the line was found and how many keys remain.
+pub fn host_remove_authorized_pubkey_impl(raw_line: String) -> Result<HostRemovePubkeyResult, String> {
+    let (_ssh_user, ak_path) = authorized_keys_path()?;
+
+    let content = if ak_path.is_file() {
+        std::fs::read_to_string(&ak_path).map_err(|e| e.to_string())?
+    } else {
+        return Ok(HostRemovePubkeyResult { removed: false, pubkey_line_count: 0 });
+    };
+
+    let target = raw_line.trim();
+    let (kept, removed): (Vec<&str>, Vec<&str>) = content
+        .lines()
+        .partition(|l| l.trim() != target);
+
+    if removed.is_empty() {
+        return Ok(HostRemovePubkeyResult {
+            removed: false,
+            pubkey_line_count: count_pubkey_lines(&content) as u32,
+        });
+    }
+
+    let mut new_content = kept.join("\n");
+    if !new_content.is_empty() {
+        new_content.push('\n');
+    }
+
+    std::fs::write(&ak_path, &new_content).map_err(|e| e.to_string())?;
+
+    Ok(HostRemovePubkeyResult {
+        removed: true,
+        pubkey_line_count: count_pubkey_lines(&new_content) as u32,
+    })
+}

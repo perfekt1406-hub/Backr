@@ -9,7 +9,7 @@ import type {
   HostProjectRow,
   HostVolumeSummary,
 } from "../../types/hostDashboard";
-import type { HostTrustAppendResult, HostTrustStatus } from "../../types/hostTrust";
+import type { AuthorizedPubkeyEntry, HostRemovePubkeyResult, HostTrustAppendResult, HostTrustStatus } from "../../types/hostTrust";
 import type { Config } from "../../types/config";
 import type { DiscoveredHost, PairingStarted } from "../../types/pairing";
 import type { BackupStatus, ProjectInfo } from "../../types/project";
@@ -390,6 +390,50 @@ export async function mockHostAppendAuthorizedPubkey(
     skipped_duplicate: false,
     pubkey_line_count: mockTrustPubkeyLineCount,
     message: "Appended (mock)",
+  };
+}
+
+/** Dev mock authorized_keys entries — seeded with two fake laptops for settings preview. */
+let mockAuthorizedPubkeys: AuthorizedPubkeyEntry[] = [
+  {
+    key_type: "ssh-ed25519",
+    key_b64: "AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyDataAlpha",
+    comment: "alice@macbook-pro",
+    raw_line: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyDataAlpha alice@macbook-pro",
+  },
+  {
+    key_type: "ssh-ed25519",
+    key_b64: "AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyDataBeta",
+    comment: "bob@thinkpad",
+    raw_line: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyDataBeta bob@thinkpad",
+  },
+];
+
+/**
+ * Mock — lists current authorized_keys entries for host Settings.
+ *
+ * External: mirrors `host_list_authorized_pubkeys` IPC without reading disk.
+ */
+export async function mockHostListAuthorizedPubkeys(): Promise<AuthorizedPubkeyEntry[]> {
+  await delay(40);
+  return [...mockAuthorizedPubkeys];
+}
+
+/**
+ * Mock — removes the matching raw_line from the in-memory key list.
+ *
+ * External: mirrors `host_remove_authorized_pubkey` IPC without writing disk.
+ */
+export async function mockHostRemoveAuthorizedPubkey(
+  rawLine: string,
+): Promise<HostRemovePubkeyResult> {
+  await delay(80);
+  const before = mockAuthorizedPubkeys.length;
+  mockAuthorizedPubkeys = mockAuthorizedPubkeys.filter((e) => e.raw_line !== rawLine);
+  mockTrustPubkeyLineCount = mockAuthorizedPubkeys.length;
+  return {
+    removed: mockAuthorizedPubkeys.length < before,
+    pubkey_line_count: mockAuthorizedPubkeys.length,
   };
 }
 
