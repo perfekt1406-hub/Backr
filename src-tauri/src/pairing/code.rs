@@ -1,58 +1,45 @@
 /*
  * Pairing code session.
  *
- * The 6-digit gate that authorizes exactly one laptop to be trusted on this host
- * during a time-boxed pairing window. Hardening that makes a short numeric code
- * safe on a shared LAN: single-use (consumed on first success), TTL expiry, and a
- * fixed wrong-attempt budget. Validation is constant-time so it can't leak how many
- * leading digits matched. The host shows `code()`; the listener calls `validate()`.
+ * The 6-digit gate that authorizes one laptop to be trusted during a pairing
+ * window. The window stays open until a laptop pairs or the host stops it (no
+ * time limit), so security rests on two properties: single-use (consumed on the
+ * first correct submission) and a fixed wrong-attempt budget that locks the
+ * session. Validation is constant-time so it can't leak how many digits matched.
  */
 
-use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
 
-/// Pairing window length (~3 minutes).
-pub const PAIRING_TTL_SECS: i64 = 180;
 /// Wrong-attempt budget before the session locks.
 pub const MAX_ATTEMPTS: u32 = 5;
 
 /// Outcome of validating a submitted pairing code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeValidation {
-    /// Code matched within TTL and attempt budget; the session is now consumed.
+    /// Code matched; the session is now consumed.
     Valid,
     /// Code did not match; carries the remaining attempt budget.
     Invalid { attempts_left: u32 },
-    /// The pairing window has elapsed.
-    Expired,
     /// Too many wrong attempts — the session is locked.
     Locked,
     /// The code was already used successfully (single-use).
     AlreadyUsed,
 }
 
-/// One active pairing window: a single-use, expiring, rate-limited 6-digit code.
+/// One active pairing window: a single-use, rate-limited 6-digit code.
 pub struct PairingSession {
     code: String,
-    /// Wall-clock expiry, surfaced to the UI for a countdown.
-    pub expires_at: DateTime<Utc>,
     attempts_left: u32,
     consumed: bool,
 }
 
 impl PairingSession {
-    /// Creates a fresh session with a random 6-digit code valid for `PAIRING_TTL_SECS`.
+    /// Creates a fresh session with a random 6-digit code.
     pub fn new() -> Self {
-        Self::with_now(Utc::now())
-    }
-
-    /// Testable constructor that pins the issue time so TTL behavior is deterministic.
-    fn with_now(now: DateTime<Utc>) -> Self {
         // External: rand 0.9 rng().random_range — uniform 6-digit value in [0, 1_000_000).
         let code = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
         Self {
             code,
-            expires_at: now + Duration::seconds(PAIRING_TTL_SECS),
             attempts_left: MAX_ATTEMPTS,
             consumed: false,
         }
@@ -63,24 +50,11 @@ impl PairingSession {
         &self.code
     }
 
-    /// True once the pairing window has lapsed at `now`.
-    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
-        now >= self.expires_at
-    }
-
-    /// Validates a submitted code at the current time, enforcing single-use, TTL,
-    /// and the attempt budget. A correct code consumes the session.
+    /// Validates a submitted code, enforcing single-use and the attempt budget.
+    /// A correct code consumes the session.
     pub fn validate(&mut self, input: &str) -> CodeValidation {
-        self.validate_at(input, Utc::now())
-    }
-
-    /// Time-injected core of [`validate`] for deterministic tests.
-    fn validate_at(&mut self, input: &str, now: DateTime<Utc>) -> CodeValidation {
         if self.consumed {
             return CodeValidation::AlreadyUsed;
-        }
-        if self.is_expired(now) {
-            return CodeValidation::Expired;
         }
         if self.attempts_left == 0 {
             return CodeValidation::Locked;
@@ -158,24 +132,6 @@ mod tests {
         }
         // Budget exhausted: even the correct code is now locked out.
         assert_eq!(s.validate(&code), CodeValidation::Locked);
-    }
-
-    #[test]
-    fn expires_after_ttl() {
-        let t0 = Utc::now();
-        let mut s = PairingSession::with_now(t0);
-        let code = s.code().to_string();
-        let after = t0 + Duration::seconds(PAIRING_TTL_SECS + 1);
-        assert_eq!(s.validate_at(&code, after), CodeValidation::Expired);
-    }
-
-    #[test]
-    fn valid_just_before_expiry() {
-        let t0 = Utc::now();
-        let mut s = PairingSession::with_now(t0);
-        let code = s.code().to_string();
-        let before = t0 + Duration::seconds(PAIRING_TTL_SECS - 1);
-        assert_eq!(s.validate_at(&code, before), CodeValidation::Valid);
     }
 
     #[test]

@@ -3,11 +3,9 @@
  * Role: Mirror the Rust pairing structs serialized over Tauri invoke (snake_case).
  */
 
-/** Returned by `start_pairing` — the code to display and when it expires. */
+/** Returned by `start_pairing` — the code to display while broadcasting. */
 export interface PairingStarted {
   code: string;
-  /** RFC3339 timestamp for the host-side countdown. */
-  expires_at: string;
 }
 
 /** A host found on the LAN while it is in pairing mode. */

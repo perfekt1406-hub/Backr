@@ -15,7 +15,7 @@ use tiny_http::Server;
 
 use crate::config::Config;
 use crate::pairing::client::pair_with_host as do_pair_with_host;
-use crate::pairing::code::{PairingSession, PAIRING_TTL_SECS};
+use crate::pairing::code::PairingSession;
 use crate::pairing::discovery::{advertise, discover_hosts as do_discover_hosts, DiscoveredHost};
 use crate::pairing::listener::{gather_host_info, serve};
 use crate::pairing::PairingRuntime;
@@ -26,11 +26,10 @@ use crate::state::AppState;
 pub struct PairingStarted {
     /// 6-digit code to show on the host.
     pub code: String,
-    /// RFC3339 expiry for the UI countdown.
-    pub expires_at: String,
 }
 
-/// Opens a pairing window (code + mDNS advertise + listener), auto-closing after the TTL.
+/// Opens a pairing window (code + mDNS advertise + listener) that stays open until a
+/// laptop pairs or stop_pairing is called.
 #[tauri::command]
 pub async fn start_pairing(state: State<'_, Arc<AppState>>) -> Result<PairingStarted, String> {
     let app = state.inner().clone();
@@ -40,7 +39,6 @@ pub async fn start_pairing(state: State<'_, Arc<AppState>>) -> Result<PairingSta
     let host = gather_host_info()?;
     let session = PairingSession::new();
     let code = session.code().to_string();
-    let expires_at = session.expires_at.to_rfc3339();
 
     // Bind the listener on an ephemeral port, then advertise that exact port.
     let server = Server::http("0.0.0.0:0").map_err(|e| e.to_string())?;
@@ -68,14 +66,7 @@ pub async fn start_pairing(state: State<'_, Arc<AppState>>) -> Result<PairingSta
         thread: Some(handle),
     });
 
-    // Auto-teardown when the window elapses.
-    let ttl_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(PAIRING_TTL_SECS as u64)).await;
-        stop_pairing_internal(&ttl_app).await;
-    });
-
-    Ok(PairingStarted { code, expires_at })
+    Ok(PairingStarted { code })
 }
 
 /// Closes the pairing window if one is open.
