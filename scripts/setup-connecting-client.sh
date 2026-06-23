@@ -492,14 +492,26 @@ install_connecting_os_packages() {
 
   case "$backend" in
     apt)
-      apt_update_once
-      run_privileged apt-get install -y \
-        ca-certificates curl wget git gnupg \
-        openssh-client rsync \
-        build-essential pkg-config cmake mold \
-        libwebkit2gtk-4.1-dev libssl-dev \
-        libayatana-appindicator3-dev librsvg2-dev \
+      # Skip apt entirely when every required package is already installed — avoids
+      # a sudo prompt on machines that were previously set up (e.g. re-runs, reinstalls).
+      local apt_pkgs=(
+        ca-certificates curl wget git gnupg
+        openssh-client rsync
+        build-essential pkg-config cmake mold
+        libwebkit2gtk-4.1-dev libssl-dev
+        libayatana-appindicator3-dev librsvg2-dev
         libxdo-dev file
+      )
+      local missing=()
+      for pkg in "${apt_pkgs[@]}"; do
+        dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" || missing+=("$pkg")
+      done
+      if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "All required packages already installed — skipping apt."
+      else
+        apt_update_once
+        run_privileged apt-get install -y "${missing[@]}"
+      fi
       ;;
     dnf)
       run_privileged dnf install -y \
