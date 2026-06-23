@@ -1,8 +1,7 @@
 <!--
   Purpose: First-run onboarding shown in the host dashboard before any backups exist.
-  Role: A four-step status checklist (steps 1-2 auto-complete, step 3 is the active
-        pairing step, step 4 is post-pairing). The action zone at the bottom toggles
-        between the one-tap pairing panel and a manual "paste pubkey" form — no navigation.
+  Role: A four-step status checklist (steps 1-2 auto-complete, step 3 has the inline
+        pairing panel + manual key-paste toggle, step 4 is post-pairing).
         Replaces the empty state in HostDashboardView until the first snapshot arrives.
 -->
 <script lang="ts">
@@ -72,7 +71,7 @@
   </div>
 
   <!-- ── Step checklist ── -->
-  <div class="flex flex-col gap-5 px-8 pb-6">
+  <div class="flex flex-col gap-5 px-8 pb-8">
 
     <!-- Step 1: Host ready (always done) -->
     <div class="flex gap-4">
@@ -99,19 +98,95 @@
       </div>
     </div>
 
-    <!-- Step 3: Pair — shows check when done, circle when pending; NO widget embedded here -->
+    <!-- Step 3: Pair — inline pairing panel + manual fallback -->
     <div class="flex gap-4">
       {#if keysOk}
         <CheckCircle2 size={20} class="mt-0.5 shrink-0 text-[var(--accent)]" aria-hidden="true" />
       {:else}
         <Circle size={20} class="mt-0.5 shrink-0 text-[var(--muted)]" aria-hidden="true" />
       {/if}
-      <div>
+      <div class="min-w-0 flex-1">
         <p class="font-medium text-[var(--text)]">3 · Pair the laptop</p>
         <p class="mt-0.5 max-w-xl text-[12px] leading-relaxed text-[var(--muted2)]">
-          Use the pairing zone below — click <strong class="font-medium text-[var(--text)]">Start pairing</strong>,
-          then on the laptop open Backr, pick this host, and type the code shown. That trusts the laptop's key automatically.
+          Click <strong class="font-medium text-[var(--text)]">Start pairing</strong>, then on the laptop open Backr,
+          pick this host, and type the code shown. That trusts the laptop's key automatically.
         </p>
+
+        {#if actionZone === "pair"}
+          <div class="mt-4">
+            <PairingPanel mode="inline" />
+          </div>
+          <button
+            type="button"
+            class="mt-4 text-[11px] text-[var(--muted)] hover:text-[var(--accent)]"
+            onclick={() => { actionZone = "manual"; actionErr = null; lastResult = null; }}
+          >
+            Prefer to paste a key by hand? Trust keys →
+          </button>
+
+        {:else}
+          <!-- Manual key-paste form -->
+          <div class="mt-4">
+            <div class="flex items-center justify-between mb-3">
+              <p class="label-caps text-[var(--muted)]">Paste public key</p>
+              <button
+                type="button"
+                class="text-[11px] text-[var(--muted)] hover:text-[var(--accent)]"
+                onclick={() => { actionZone = "pair"; actionErr = null; lastResult = null; }}
+              >
+                ← Back to pairing
+              </button>
+            </div>
+
+            {#if trust}
+              <div class="mb-3 flex flex-wrap gap-x-6 gap-y-1 text-[12px] text-[var(--muted2)]">
+                <span>SSH user <span class="font-mono text-[var(--text)]">{trust.ssh_user}</span></span>
+                <span>Trusted keys <span class="font-semibold tabular-nums text-[var(--text)]">{trust.pubkey_line_count}</span></span>
+                <span class="break-all font-mono text-[11px]">{trust.authorized_keys_path}</span>
+              </div>
+            {/if}
+
+            <label for="guide-pubkey-paste" class="label-caps mb-2 block text-[var(--muted)]">
+              Paste the laptop's public key line
+            </label>
+            <textarea
+              id="guide-pubkey-paste"
+              bind:value={pubkeyPaste}
+              rows={3}
+              placeholder="ssh-ed25519 AAAA… you@laptop"
+              class="w-full max-w-xl resize-y rounded-[6px] border border-[var(--border)] bg-[var(--bg2)] px-3 py-2 font-mono text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+            ></textarea>
+            <div class="mt-3 flex flex-wrap gap-3">
+              <button
+                type="button"
+                class="rounded-[6px] bg-[var(--accent)] px-4 py-2 text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--bg)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                disabled={submitBusy || !pubkeyPaste.trim()}
+                onclick={() => void submitPubkey()}
+              >
+                {submitBusy ? "Adding…" : "Add key"}
+              </button>
+              <button
+                type="button"
+                class="rounded-[6px] border border-[var(--border)] px-4 py-2 text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                onclick={() => void refreshTrust()}
+              >
+                Refresh
+              </button>
+            </div>
+
+            {#if actionErr}
+              <p class="mt-3 text-[12px] text-[var(--warn)]">{actionErr}</p>
+            {/if}
+
+            {#if lastResult}
+              <p class="mt-3 text-[12px] font-medium text-[var(--accent)]">{lastResult.message}</p>
+              {#if lastResult.sudo_script}
+                <p class="mt-2 text-[11px] text-[var(--muted2)]">Run on this machine's terminal:</p>
+                <pre class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-[6px] border border-[var(--border)] bg-[var(--bg2)] p-3 font-mono text-[11px] text-[var(--text)]">{lastResult.sudo_script}</pre>
+              {/if}
+            {/if}
+          </div>
+        {/if}
       </div>
     </div>
 
@@ -133,85 +208,5 @@
 
   </div>
 
-  <!-- ── Divider ── -->
-  <div class="mx-8 border-t border-[var(--border)]"></div>
-
-  <!-- ── Action zone: toggles between pairing and manual key paste ── -->
-  <div class="px-8 py-6 bg-[var(--bg3)]">
-
-    {#if actionZone === "pair"}
-      <p class="label-caps mb-4 text-[var(--muted)]">Step 3 · Pairing</p>
-      <PairingPanel mode="inline" />
-      <button
-        type="button"
-        class="mt-4 text-[11px] text-[var(--muted)] hover:text-[var(--accent)]"
-        onclick={() => { actionZone = "manual"; actionErr = null; lastResult = null; }}
-      >
-        Prefer to paste a key by hand? Trust keys →
-      </button>
-
-    {:else}
-      <!-- Manual key-paste form -->
-      <div class="flex items-center justify-between mb-4">
-        <p class="label-caps text-[var(--muted)]">Step 3 · Paste public key</p>
-        <button
-          type="button"
-          class="text-[11px] text-[var(--muted)] hover:text-[var(--accent)]"
-          onclick={() => { actionZone = "pair"; actionErr = null; lastResult = null; }}
-        >
-          ← Back to pairing
-        </button>
-      </div>
-
-      {#if trust}
-        <div class="mb-4 flex flex-wrap gap-x-6 gap-y-1 text-[12px] text-[var(--muted2)]">
-          <span>SSH user <span class="font-mono text-[var(--text)]">{trust.ssh_user}</span></span>
-          <span>Trusted keys <span class="font-semibold tabular-nums text-[var(--text)]">{trust.pubkey_line_count}</span></span>
-          <span class="break-all font-mono text-[11px]">{trust.authorized_keys_path}</span>
-        </div>
-      {/if}
-
-      <label for="guide-pubkey-paste" class="label-caps mb-2 block text-[var(--muted)]">
-        Paste the laptop's public key line
-      </label>
-      <textarea
-        id="guide-pubkey-paste"
-        bind:value={pubkeyPaste}
-        rows={3}
-        placeholder="ssh-ed25519 AAAA… you@laptop"
-        class="w-full max-w-xl resize-y rounded-[6px] border border-[var(--border)] bg-[var(--bg2)] px-3 py-2 font-mono text-[12px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
-      ></textarea>
-      <div class="mt-3 flex flex-wrap gap-3">
-        <button
-          type="button"
-          class="rounded-[6px] bg-[var(--accent)] px-4 py-2 text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--bg)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
-          disabled={submitBusy || !pubkeyPaste.trim()}
-          onclick={() => void submitPubkey()}
-        >
-          {submitBusy ? "Adding…" : "Add key"}
-        </button>
-        <button
-          type="button"
-          class="rounded-[6px] border border-[var(--border)] px-4 py-2 text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
-          onclick={() => void refreshTrust()}
-        >
-          Refresh
-        </button>
-      </div>
-
-      {#if actionErr}
-        <p class="mt-3 text-[12px] text-[var(--warn)]">{actionErr}</p>
-      {/if}
-
-      {#if lastResult}
-        <p class="mt-3 text-[12px] font-medium text-[var(--accent)]">{lastResult.message}</p>
-        {#if lastResult.sudo_script}
-          <p class="mt-2 text-[11px] text-[var(--muted2)]">Run on this machine's terminal:</p>
-          <pre class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-[6px] border border-[var(--border)] bg-[var(--bg2)] p-3 font-mono text-[11px] text-[var(--text)]">{lastResult.sudo_script}</pre>
-        {/if}
-      {/if}
-    {/if}
-
-  </div>
 
 </div>
