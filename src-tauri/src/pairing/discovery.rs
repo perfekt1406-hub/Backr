@@ -6,6 +6,7 @@
  * hosts currently advertising that service.
  */
 
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -34,17 +35,37 @@ pub fn hostname_short() -> String {
         .unwrap_or_else(|| "backr-host".to_string())
 }
 
-/// Advertises this host's pairing service on `port` over mDNS, auto-detecting LAN
-/// addresses. Returns the daemon and the registered fullname for later unregister.
+/// Returns the primary outbound IPv4 address by connecting a UDP socket to an
+/// external address (no packets are sent). Falls back to `None` when offline.
+fn primary_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(a) if !a.is_loopback() => Some(a),
+        _ => None,
+    }
+}
+
+/// Advertises this host's pairing service on `port` over mDNS.
+/// Registers only the primary IPv4 address so clients see one entry per host.
+/// Falls back to auto-detection when no IPv4 address can be determined.
 pub fn advertise(port: u16) -> Result<(ServiceDaemon, String), String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     let host = hostname_short();
     let host_name = format!("{host}.local.");
     let instance = format!("Backr on {host}");
     let props = [("hostname", host.as_str())];
-    let info = ServiceInfo::new(PAIRING_SERVICE_TYPE, &instance, &host_name, "", port, &props[..])
-        .map_err(|e| e.to_string())?
-        .enable_addr_auto();
+
+    let info = if let Some(ipv4) = primary_ipv4() {
+        ServiceInfo::new(PAIRING_SERVICE_TYPE, &instance, &host_name, IpAddr::V4(ipv4), port, &props[..])
+            .map_err(|e| e.to_string())?
+    } else {
+        // No IPv4 route found — fall back to auto-detection.
+        ServiceInfo::new(PAIRING_SERVICE_TYPE, &instance, &host_name, "", port, &props[..])
+            .map_err(|e| e.to_string())?
+            .enable_addr_auto()
+    };
+
     let fullname = info.get_fullname().to_string();
     daemon.register(info).map_err(|e| e.to_string())?;
     Ok((daemon, fullname))
