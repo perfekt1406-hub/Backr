@@ -8,6 +8,7 @@
  */
 
 pub mod code;
+pub mod listener;
 
 /// mDNS service type a host advertises while in pairing mode and a client browses for.
 pub const PAIRING_SERVICE_TYPE: &str = "_backr._tcp.local.";
