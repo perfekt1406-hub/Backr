@@ -8,6 +8,7 @@
   import Router, { replace } from "svelte-spa-router";
 
   import ErrorToast from "./components/shared/ErrorToast.svelte";
+  import DevScreenSwitcher from "./components/layout/DevScreenSwitcher.svelte";
   import SidebarNav from "./components/layout/SidebarNav.svelte";
   import { listenBackupProgress } from "./lib/events";
   import {
@@ -120,6 +121,10 @@
 </script>
 
 <ErrorToast />
+
+{#if devShellToggleEnabled()}
+  <DevScreenSwitcher />
+{/if}
 
 <div class="flex h-screen bg-[var(--bg)] text-[var(--text)]">
   <SidebarNav />

@@ -313,6 +313,9 @@ export async function getActivitySeries(): Promise<ActivityPoint[]> {
  * External: `invoke` → `start_pairing`.
  */
 export async function startPairing(): Promise<PairingStarted> {
+  if (useDevMock()) {
+    return devMockBackend.mockStartPairing();
+  }
   return invoke<PairingStarted>("start_pairing");
 }
 
@@ -322,6 +325,10 @@ export async function startPairing(): Promise<PairingStarted> {
  * External: `invoke` → `stop_pairing`.
  */
 export async function stopPairing(): Promise<void> {
+  if (useDevMock()) {
+    await devMockBackend.mockStopPairing();
+    return;
+  }
   await invoke("stop_pairing");
 }
 
@@ -331,6 +338,9 @@ export async function stopPairing(): Promise<void> {
  * External: `invoke` → `pairing_status`.
  */
 export async function pairingStatus(): Promise<boolean> {
+  if (useDevMock()) {
+    return devMockBackend.mockPairingStatus();
+  }
   return invoke<boolean>("pairing_status");
 }
 
@@ -340,6 +350,9 @@ export async function pairingStatus(): Promise<boolean> {
  * External: `invoke` → `discover_hosts`.
  */
 export async function discoverHosts(): Promise<DiscoveredHost[]> {
+  if (useDevMock()) {
+    return devMockBackend.mockDiscoverHosts();
+  }
   return invoke<DiscoveredHost[]>("discover_hosts");
 }
 
@@ -350,5 +363,8 @@ export async function discoverHosts(): Promise<DiscoveredHost[]> {
  * External: `invoke` → `pair_with_host`.
  */
 export async function pairWithHost(address: string, code: string): Promise<Config> {
+  if (useDevMock()) {
+    return devMockBackend.mockPairWithHost(address, code);
+  }
   return invoke<Config>("pair_with_host", { address, code });
 }
