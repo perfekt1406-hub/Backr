@@ -590,6 +590,20 @@ ensure_ssh_dir() {
     run_cmd chown "${BACKR_USER}:${BACKR_USER}" "${home_dir}/.ssh/authorized_keys"
     run_cmd chmod 600 "${home_dir}/.ssh/authorized_keys"
   fi
+
+  # Grant the desktop user (who runs the Backr host-dashboard app) write access to
+  # authorized_keys via POSIX ACL so the one-tap pairing flow can add client keys
+  # without requiring an interactive sudo prompt.  OpenSSH StrictModes checks mode
+  # bits only, not ACL entries, so this does not break SSH login.
+  local du
+  du="$(detect_desktop_user 2>/dev/null)" || return 0
+  if command -v setfacl &>/dev/null; then
+    run_cmd setfacl -m "u:${du}:rwx" "${home_dir}/.ssh"
+    run_cmd setfacl -m "u:${du}:rw"  "${home_dir}/.ssh/authorized_keys"
+    echo "ACL granted: ${du} can write ${home_dir}/.ssh/authorized_keys (pairing flow)."
+  else
+    echo "warning: setfacl not available — the Backr pairing flow will fall back to the manual sudo snippet." >&2
+  fi
 }
 
 #

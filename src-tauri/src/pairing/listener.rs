@@ -184,7 +184,15 @@ fn handle_request(mut request: tiny_http::Request, state: &AppState, host: &Host
         return false;
     };
     let result = process_pair(session, &req, host, |line| {
-        host_append_authorized_pubkey_impl(line.to_string()).map(|_| ())
+        let r = host_append_authorized_pubkey_impl(line.to_string())
+            .map_err(|e| e)?;
+        // appended=false + skipped_duplicate=false means the host process doesn't own
+        // authorized_keys — the sudo fallback path returned Ok but wrote nothing.
+        if r.appended || r.skipped_duplicate {
+            Ok(())
+        } else {
+            Err("host cannot write authorized_keys — run the sudo snippet from the Trust keys UI".to_string())
+        }
     });
     drop(guard);
 

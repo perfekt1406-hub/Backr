@@ -35,11 +35,12 @@
 
   let draft = $state<Config>(emptyConfig());
 
-  /** Adopts a paired host's prefilled config and jumps to the verify step. */
+  /** Adopts a paired host's prefilled config and advances to the paths step so the
+   *  user can confirm their local projects root and backup cadence before verifying. */
   function adoptPairedConfig(cfg: Config): void {
     draft = cfg;
     mode = "wizard";
-    step = 2;
+    step = 1;
   }
 
   /** Switches from discovery to manual entry with a blank draft. */
@@ -75,6 +76,8 @@
 
   /** Navigates to the dashboard after configuration persists. */
   function finish(): void {
+    // Mark as client so the hashchange handler in App.svelte doesn't redirect back to /setup.
+    shellKind.set("client");
     replace("/");
   }
 </script>

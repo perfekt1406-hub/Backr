@@ -990,6 +990,34 @@ uninstall_backr() {
 }
 
 #
+# Detects an existing Backr installation under ~/.local/share/backr and removes it
+# before a fresh build/download install.  Leaves ~/.config/backr (config, state) and
+# SSH keys untouched — this is a clean reinstall, not a factory reset.  Called
+# automatically at the start of every build and download flow so that users who run
+# the script on a machine that already has Backr installed get a clean slate binary
+# instead of an old one that may have been built against stale deps.
+#
+remove_existing_install_if_present() {
+  local dir="$HOME/.local/share/backr"
+  local found=0
+  [[ -f "${dir}/backr" ]] && found=1
+  [[ -f "${dir}/Backr.AppImage" ]] && found=1
+  [[ "$found" -eq 0 ]] && return 0
+
+  echo "Existing Backr installation detected — removing before reinstall …"
+  stop_running_backr
+  rm -f "${dir}/backr" "${dir}/Backr.AppImage"
+  rmdir "$dir" 2>/dev/null || true
+  rm -f "$HOME/.local/share/applications/com.backr.app.desktop"
+  rm -f "$HOME"/.local/share/icons/hicolor/*/apps/com.backr.app.png 2>/dev/null || true
+  refresh_application_launcher_caches
+  if command -v gtk-update-icon-cache &>/dev/null; then
+    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" &>/dev/null || true
+  fi
+  echo "Previous installation removed. Proceeding with fresh install …"
+}
+
+#
 # Inputs: REPO_ROOT (from BASH_SOURCE). Outputs: a usable Backr source tree.
 # When run from a checkout (package.json + src-tauri/Cargo.toml present) it is
 # used as-is.  When piped via `curl … | bash` there is no checkout, so the
@@ -1140,6 +1168,7 @@ main() {
 
   case "$SETUP_KIND" in
     download)
+      remove_existing_install_if_present
       clear_host_marker_for_client
       install_appimage_from_network
       print_install_done
@@ -1153,6 +1182,7 @@ main() {
       print_done
       ;;
     build)
+      remove_existing_install_if_present
       clear_host_marker_for_client
       install_app_build_and_integrate
       print_install_done
