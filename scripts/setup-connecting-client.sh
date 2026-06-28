@@ -1054,16 +1054,14 @@ uninstall_backr() {
     gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" &>/dev/null || true
   fi
   echo "Backr app removed (binary, launcher entry, icons)."
-  echo "Left untouched: your config (~/.config/backr), SSH keys, and the toolchain (Node/Rust/system packages)."
+  echo "Left untouched: your config (~/.config/backr), SSH keys, toolchain (Node/Rust/system packages)."
+  echo "To also clear pairing config: rm -rf \"\${XDG_CONFIG_HOME:-\$HOME/.config}/backr\""
 }
 
 #
 # Detects an existing Backr installation under ~/.local/share/backr and removes it
-# before a fresh build/download install.  Leaves ~/.config/backr (config, state) and
-# SSH keys untouched — this is a clean reinstall, not a factory reset.  Called
-# automatically at the start of every build and download flow so that users who run
-# the script on a machine that already has Backr installed get a clean slate binary
-# instead of an old one that may have been built against stale deps.
+# before a fresh build/download install.  Leaves config — config is handled separately
+# by clear_backr_config_for_reinstall.  Called at the start of every build/download flow.
 #
 remove_existing_install_if_present() {
   local dir="$HOME/.local/share/backr"
@@ -1083,6 +1081,21 @@ remove_existing_install_if_present() {
     gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" &>/dev/null || true
   fi
   echo "Previous installation removed. Proceeding with fresh install …"
+}
+
+#
+# Wipes ~/.config/backr so the app opens in setup/pairing mode after a reinstall.
+# Always called for build and download flows — independent of whether a prior binary
+# was found — so stale config never carries over from a previous install.
+# SSH keys in ~/.ssh are never touched.
+#
+clear_backr_config_for_reinstall() {
+  local cfg_dir
+  cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/backr"
+  if [[ -d "$cfg_dir" ]]; then
+    rm -rf "$cfg_dir"
+    echo "Cleared Backr config (${cfg_dir}) — app will open in setup/pairing mode."
+  fi
 }
 
 #
@@ -1237,6 +1250,7 @@ main() {
   case "$SETUP_KIND" in
     download)
       remove_existing_install_if_present
+      clear_backr_config_for_reinstall
       clear_host_marker_for_client
       install_appimage_from_network
       ensure_mdns_resolution
@@ -1253,6 +1267,7 @@ main() {
       ;;
     build)
       remove_existing_install_if_present
+      clear_backr_config_for_reinstall
       clear_host_marker_for_client
       install_app_build_and_integrate
       ensure_mdns_resolution

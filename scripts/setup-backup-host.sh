@@ -31,6 +31,7 @@
 #   --appimage-url URL        Download this URL instead of the default AppImage release.
 #   --no-appimage             Skip the Backr AppImage download and auto-launch (headless/server installs).
 #   --desktop-user USER       OS user who gets the Backr AppImage + .desktop entry (default: $SUDO_USER or first non-system user).
+#   --remove-old-files        Delete all existing backed-up snapshots under BACKR_ROOT before setup (cleans broken/partial backups).
 #   --dry-run                 Print actions only.
 #   --verbose                 Print detected OS/firewall/sshd diagnostics after setup.
 #   -h, --help                Show this text.
@@ -52,6 +53,7 @@ BACKR_ROOT="${BACKR_ROOT:-/srv/backr}"
 DRY_RUN=0
 VERBOSE=0
 SKIP_FIREWALL=0
+REMOVE_OLD_FILES=0
 # Optional pubkey bootstrap (see append_trust_pubkeys_from_cli_or_env).
 TRUST_PUBKEY_FILE_CLI=""
 # Questionnaire / non-interactive (see run_backup_host_questionnaire).
@@ -128,6 +130,10 @@ parse_args() {
         ;;
       --no-appimage)
         SKIP_HOST_APPIMAGE=1
+        shift
+        ;;
+      --remove-old-files)
+        REMOVE_OLD_FILES=1
         shift
         ;;
       -h | --help)
@@ -567,6 +573,27 @@ ensure_user_exists() {
     echo "Creating user '${BACKR_USER}' (login shell: /bin/bash)."
     run_cmd useradd -m -s /bin/bash "$BACKR_USER"
   fi
+}
+
+#
+# Inputs: REMOVE_OLD_FILES global, BACKR_ROOT, DRY_RUN. Must run as root.
+# Outputs: removes all snapshot directories under BACKR_ROOT when --remove-old-files is passed.
+#          The root directory itself is preserved and recreated by ensure_backup_tree.
+#
+remove_old_backup_files() {
+  [[ "$REMOVE_OLD_FILES" -eq 1 ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] rm -rf ${BACKR_ROOT}/* (--remove-old-files)"
+    return 0
+  fi
+  if [[ ! -d "$BACKR_ROOT" ]]; then
+    echo "--remove-old-files: ${BACKR_ROOT} does not exist yet — nothing to remove."
+    return 0
+  fi
+  echo "Removing old backup files under ${BACKR_ROOT} (--remove-old-files) …"
+  # Remove contents, not the directory itself (ensure_backup_tree recreates it).
+  find "$BACKR_ROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+  echo "Old backup files removed."
 }
 
 ensure_backup_tree() {
@@ -1607,6 +1634,7 @@ main() {
   ensure_host_mdns_publish
   ensure_sshd_includes_drop_in_dir
   ensure_user_exists
+  remove_old_backup_files
   ensure_backup_tree
   ensure_ssh_dir
   append_trust_pubkeys_from_cli_or_env
