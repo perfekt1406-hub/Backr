@@ -7,7 +7,7 @@ import { writable, type Writable } from "svelte/store";
 
 import * as commands from "../lib/commands";
 import type { Config } from "../types/config";
-import { showToast } from "./ui";
+import { handleCommandError } from "./ui";
 
 /** Latest configuration (`null` before first successful disk load). */
 export const config: Writable<Config | null> = writable(null);
@@ -23,13 +23,13 @@ export async function loadConfig(): Promise<Config | null> {
     config.set(next);
     return next;
   } catch (err) {
-    showToast(String(err));
+    handleCommandError(err);
     return null;
   }
 }
 
 /**
- * Persists `next`, refreshes the store, and surfaces failures through `showToast`.
+ * Persists `next`, refreshes the store, and surfaces failures through `handleCommandError`.
  *
  * External: `commands.saveConfig` persists atomically and restarts the scheduler.
  */
@@ -39,7 +39,7 @@ export async function saveCfg(next: Config): Promise<boolean> {
     config.set(next);
     return true;
   } catch (err) {
-    showToast(String(err));
+    handleCommandError(err);
     return false;
   }
 }

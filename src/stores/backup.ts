@@ -8,7 +8,7 @@ import { writable, type Writable } from "svelte/store";
 import * as commands from "../lib/commands";
 import type { BackupStatus } from "../types/project";
 import { refreshProjects } from "./projects";
-import { showToast } from "./ui";
+import { handleCommandError } from "./ui";
 
 /** Mutex / schedule snapshot from Rust `AppState`. */
 export const backupStatus: Writable<BackupStatus | null> = writable(null);
@@ -30,7 +30,7 @@ export async function refreshBackupStatus(): Promise<void> {
     backupStatus.set(status);
   } catch (err) {
     backupStatus.set(null);
-    showToast(String(err));
+    handleCommandError(err);
   }
 }
 
@@ -45,7 +45,7 @@ export async function requestBackup(project?: string): Promise<void> {
     await refreshBackupStatus();
     await refreshProjects();
   } catch (err) {
-    showToast(String(err));
+    handleCommandError(err);
   }
 }
 

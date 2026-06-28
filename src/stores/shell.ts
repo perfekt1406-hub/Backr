@@ -5,8 +5,13 @@
 
 import { writable, type Writable } from "svelte/store";
 
-/** SPA bootstrap classification mirrored from Rust [`resolve_shell_bootstrap`]. */
-export const shellKind: Writable<"client" | "setup" | "host"> = writable("client");
+/**
+ * SPA bootstrap classification mirrored from Rust [`resolve_shell_bootstrap`].
+ *
+ * Starts as `"loading"` so no shell-specific chrome renders before bootstrap resolves.
+ * `App.svelte` sets the final value once `resolve_shell_bootstrap` returns.
+ */
+export const shellKind: Writable<"client" | "setup" | "host" | "loading"> = writable("loading");
 
 /** Absolute backup root passed through [`ShellBootstrap`] for NAS-local dashboards. */
 export const hostDashboardRoot: Writable<string | null> = writable(null);
