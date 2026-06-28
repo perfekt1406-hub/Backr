@@ -6,47 +6,17 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use shell_escape::escape;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use crate::backup::ssh::remote_path_join;
+use crate::backup::ssh::{remote_path_join, ssh_rsh_string};
 use crate::error::BackrError;
 use crate::progress_sink::SharedProgress;
 
 /// Event name forwarded to the webview for raw rsync `--info=progress2` lines.
 pub const BACKUP_PROGRESS_EVENT: &str = "backup://progress";
 
-/// Builds the `ssh` command embedded in `rsync --rsh` for backup (accepts new host keys).
-///
-/// # Inputs
-///
-/// * `ssh_key` — expanded private key path.
-/// * `known_hosts` — Backr-specific `known_hosts` file path.
-///
-/// # Returns
-///
-/// A single shell-safe string suitable for `rsync -e '<returned>'`.
-fn ssh_rsh_backup(ssh_key: &str, known_hosts: &Path, ssh_port: u16) -> String {
-    let key = escape(std::borrow::Cow::Borrowed(ssh_key));
-    let kh_owned = known_hosts.to_string_lossy().into_owned();
-    let kh = escape(std::borrow::Cow::Borrowed(kh_owned.as_str()));
-    format!(
-        "ssh -p {ssh_port} -i {key} -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o UserKnownHostsFile={kh}",
-    )
-}
-
-/// Builds the `ssh` command embedded in `rsync --rsh` for restore (batch mode, known_hosts file).
-///
-/// # Inputs
-///
-/// Same as [`ssh_rsh_backup`], but omits `StrictHostKeyChecking=accept-new` per restore plan.
-fn ssh_rsh_restore(ssh_key: &str, known_hosts: &Path, ssh_port: u16) -> String {
-    let key = escape(std::borrow::Cow::Borrowed(ssh_key));
-    let kh_owned = known_hosts.to_string_lossy().into_owned();
-    let kh = escape(std::borrow::Cow::Borrowed(kh_owned.as_str()));
-    format!("ssh -p {ssh_port} -i {key} -o BatchMode=yes -o UserKnownHostsFile={kh}",)
-}
+// ssh_rsh_string is imported from crate::backup::ssh; see its doc-comment for details.
 
 /// Runs a backup rsync from a local project directory into a fresh remote snapshot folder.
 ///
@@ -75,7 +45,8 @@ pub async fn rsync_backup_snapshot(
     }
 
     let remote_url = format!("{user}@{host}:{remote_dest_folder}/");
-    let rsh = ssh_rsh_backup(ssh_key, known_hosts, ssh_port);
+    // accept_new=true: backup runs may encounter new host keys on first sync.
+    let rsh = ssh_rsh_string(ssh_key, known_hosts, ssh_port, host, true);
 
     let mut cmd = Command::new("rsync");
     cmd.arg("--archive");
@@ -112,16 +83,19 @@ pub async fn rsync_backup_snapshot(
 /// # Inputs
 ///
 /// * `remote_snapshot_url` — `user@host:/abs/path/to/snapshot/` form; trailing slash added if missing.
+/// * `host` — remote hostname or IP; passed separately for ControlMaster socket naming.
 /// * `local_destination` — local folder to receive files (caller ensures uniqueness).
 pub async fn rsync_restore_snapshot(
     sink: SharedProgress,
     ssh_key: &str,
     known_hosts: &Path,
     remote_snapshot_url: &str,
+    host: &str,
     ssh_port: u16,
     local_destination: &Path,
 ) -> Result<(), BackrError> {
-    let rsh = ssh_rsh_restore(ssh_key, known_hosts, ssh_port);
+    // accept_new=false: restore must only connect to already-trusted hosts.
+    let rsh = ssh_rsh_string(ssh_key, known_hosts, ssh_port, host, false);
     let mut dest = local_destination.display().to_string();
     if !dest.ends_with('/') {
         dest.push('/');
