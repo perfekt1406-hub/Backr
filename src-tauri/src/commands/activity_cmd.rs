@@ -1,12 +1,16 @@
 /*
  * Lightweight backup activity samples for dashboard timelines.
  * Surfaces persisted cadence metadata without maintaining a separate event database.
+ *
+ * Returns `Result<T, BackrCommandError>` so the frontend receives a typed
+ * `{ kind, message }` error object rather than a bare string.
  */
 
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
 
+use crate::error::BackrCommandError;
 use crate::state::AppState;
 
 /// One marker on the backup activity strip (Unix seconds + stable label key).
@@ -30,8 +34,9 @@ pub struct ActivityPoint {
 #[tauri::command]
 pub async fn get_activity_series(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<ActivityPoint>, String> {
+) -> Result<Vec<ActivityPoint>, BackrCommandError> {
     let cfg_opt = state.config.lock().await.clone();
+    /* Return an empty series gracefully when the app is not yet configured. */
     let Some(cfg) = cfg_opt else {
         return Ok(Vec::new());
     };

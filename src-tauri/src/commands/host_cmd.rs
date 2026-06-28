@@ -1,5 +1,8 @@
 /*
  * Tauri commands for backup-host dashboard bootstrap plus local filesystem introspection.
+ *
+ * All commands return `Result<T, BackrCommandError>` so the frontend receives a typed
+ * `{ kind, message }` error object rather than a bare string.
  */
 
 use std::path::Path;
@@ -8,6 +11,7 @@ use std::process::Command;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::error::BackrCommandError;
 use crate::host_config::read_host_dashboard_marker;
 use crate::project_snapshot_cache::parse_snapshot_timestamp;
 
@@ -52,7 +56,8 @@ pub struct HostVolumeSummary {
 
 /// Chooses laptop setup vs client vs NAS-local dashboard before SPA routing completes.
 #[tauri::command]
-pub fn resolve_shell_bootstrap() -> Result<ShellBootstrap, String> {
+pub fn resolve_shell_bootstrap() -> Result<ShellBootstrap, BackrCommandError> {
+    /* read_host_dashboard_marker reads the host marker file if this machine is configured as a NAS. */
     if let Some(marker) = read_host_dashboard_marker() {
         let root = Path::new(&marker.backup_root);
         if root.is_dir() {
@@ -67,6 +72,7 @@ pub fn resolve_shell_bootstrap() -> Result<ShellBootstrap, String> {
         );
     }
 
+    /* crate::config::load_config reads config.toml from the user config directory if present. */
     match crate::config::load_config() {
         Ok(Some(_)) => Ok(ShellBootstrap::Client),
         Ok(None) => Ok(ShellBootstrap::Setup),
@@ -98,14 +104,19 @@ fn snapshot_dirs(project_path: &Path) -> Vec<String> {
 
 /// Lists projects by scanning `backup_root/<project>/<snapshot>/` locally on the NAS machine.
 #[tauri::command]
-pub fn host_list_snapshot_projects(backup_root: String) -> Result<Vec<HostProjectRow>, String> {
+pub fn host_list_snapshot_projects(
+    backup_root: String,
+) -> Result<Vec<HostProjectRow>, BackrCommandError> {
     let base = Path::new(&backup_root);
     if !base.is_dir() {
-        return Err(format!("backup_root is not a directory: {}", backup_root));
+        return Err(BackrCommandError::invalid_input(format!(
+            "backup_root is not a directory: {}",
+            backup_root
+        )));
     }
 
     let mut names: Vec<String> = std::fs::read_dir(base)
-        .map_err(|e| e.to_string())?
+        .map_err(BackrCommandError::from)?
         .filter_map(Result::ok)
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
@@ -181,10 +192,13 @@ fn parse_df_legacy_row(line: &str) -> (Option<u64>, Option<u64>) {
 ///
 /// * `backup_root` — path whose containing filesystem should be queried (may be file or directory).
 #[tauri::command]
-pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, String> {
+pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, BackrCommandError> {
     let path = Path::new(&backup_root);
     if !path.exists() {
-        return Err(format!("backup_root does not exist: {}", backup_root));
+        return Err(BackrCommandError::invalid_input(format!(
+            "backup_root does not exist: {}",
+            backup_root
+        )));
     }
 
     let enriched = Command::new("df")
@@ -194,7 +208,7 @@ pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, Str
             backup_root.as_str(),
         ])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(BackrCommandError::from)?;
 
     if enriched.status.success() {
         let text = String::from_utf8_lossy(&enriched.stdout);
@@ -219,7 +233,7 @@ pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, Str
     let legacy = Command::new("df")
         .args(["-B1", "--output=avail,size", backup_root.as_str()])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(BackrCommandError::from)?;
 
     if !legacy.status.success() {
         return Ok(HostVolumeSummary {
@@ -254,7 +268,7 @@ pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, Str
 ///
 /// # Inputs
 ///
-/// * `backup_root` — backup tree root to scan.
+/// * `backup_root`   — backup tree root to scan.
 /// * `force_refresh` — bypass TTL and attempt a fresh `du` pass when true.
 ///
 /// External: `tauri::async_runtime::spawn_blocking` schedules [`crate::host_disk_inventory::host_disk_inventory_impl`].
@@ -262,20 +276,23 @@ pub fn host_volume_summary(backup_root: String) -> Result<HostVolumeSummary, Str
 pub async fn host_disk_inventory(
     backup_root: String,
     force_refresh: bool,
-) -> Result<crate::host_disk_inventory::HostDiskInventory, String> {
+) -> Result<crate::host_disk_inventory::HostDiskInventory, BackrCommandError> {
+    /* tauri::async_runtime::spawn_blocking runs `du` on a thread-pool thread (blocking I/O). */
     tauri::async_runtime::spawn_blocking(move || {
         crate::host_disk_inventory::host_disk_inventory_impl(backup_root, force_refresh)
     })
     .await
-    .map_err(|e| format!("disk inventory task failed: {e}"))?
+    .map_err(|e| BackrCommandError::task_failed(format!("disk inventory task failed: {e}")))?
+    .map_err(BackrCommandError::from)
 }
 
 /// Reports authorized_keys path + pubkey count for the backup SSH account (host Trust page).
 ///
 /// External: delegates to [`crate::host_trust::host_trust_status_impl`] (inputs: none; outputs: [`crate::host_trust::HostTrustStatus`]).
 #[tauri::command]
-pub fn host_trust_status() -> Result<crate::host_trust::HostTrustStatus, String> {
-    crate::host_trust::host_trust_status_impl()
+pub fn host_trust_status() -> Result<crate::host_trust::HostTrustStatus, BackrCommandError> {
+    /* host_trust::host_trust_status_impl reads and parses authorized_keys on the host. */
+    crate::host_trust::host_trust_status_impl().map_err(BackrCommandError::from)
 }
 
 /// Appends one validated pubkey line to authorized_keys, or returns sudo fallback commands for the operator.
@@ -284,16 +301,20 @@ pub fn host_trust_status() -> Result<crate::host_trust::HostTrustStatus, String>
 #[tauri::command]
 pub fn host_append_authorized_pubkey(
     pubkey_line: String,
-) -> Result<crate::host_trust::HostTrustAppendResult, String> {
+) -> Result<crate::host_trust::HostTrustAppendResult, BackrCommandError> {
+    /* host_trust::host_append_authorized_pubkey_impl validates and appends one pubkey line. */
     crate::host_trust::host_append_authorized_pubkey_impl(pubkey_line)
+        .map_err(BackrCommandError::from)
 }
 
 /// Lists every parsed pubkey entry in authorized_keys for the host Settings trusted-keys list.
 ///
 /// External: delegates to [`crate::host_trust::host_list_authorized_pubkeys_impl`] (inputs: none; outputs: Vec<[`crate::host_trust::AuthorizedPubkeyEntry`]>).
 #[tauri::command]
-pub fn host_list_authorized_pubkeys() -> Result<Vec<crate::host_trust::AuthorizedPubkeyEntry>, String> {
-    crate::host_trust::host_list_authorized_pubkeys_impl()
+pub fn host_list_authorized_pubkeys(
+) -> Result<Vec<crate::host_trust::AuthorizedPubkeyEntry>, BackrCommandError> {
+    /* host_trust::host_list_authorized_pubkeys_impl reads and parses all authorized_keys entries. */
+    crate::host_trust::host_list_authorized_pubkeys_impl().map_err(BackrCommandError::from)
 }
 
 /// Removes one pubkey line (identified by exact raw_line match) from authorized_keys.
@@ -302,6 +323,7 @@ pub fn host_list_authorized_pubkeys() -> Result<Vec<crate::host_trust::Authorize
 #[tauri::command]
 pub fn host_remove_authorized_pubkey(
     raw_line: String,
-) -> Result<crate::host_trust::HostRemovePubkeyResult, String> {
-    crate::host_trust::host_remove_authorized_pubkey_impl(raw_line)
+) -> Result<crate::host_trust::HostRemovePubkeyResult, BackrCommandError> {
+    /* host_trust::host_remove_authorized_pubkey_impl removes a pubkey line by exact match. */
+    crate::host_trust::host_remove_authorized_pubkey_impl(raw_line).map_err(BackrCommandError::from)
 }
