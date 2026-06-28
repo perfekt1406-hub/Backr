@@ -14,6 +14,7 @@ use tauri::{AppHandle, State};
 
 use crate::backup::rsync;
 use crate::backup::ssh::{self, is_valid_snapshot_name};
+use crate::backup::validate::{validate_relative_path, validate_remote_component};
 use crate::config::{self};
 use crate::error::{BackrCommandError, BackrError};
 use crate::progress_sink::{AppEmitProgress, SharedProgress};
@@ -209,6 +210,9 @@ pub async fn list_snapshots(
     state: State<'_, Arc<AppState>>,
     project: String,
 ) -> Result<Vec<SnapshotEntry>, BackrCommandError> {
+    // Validate `project` before any config load or SSH call — rejects traversal attempts.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+
     /* AppState::require_config returns the cloned Config or a NotConfigured error. */
     let cfg = state.require_config().await?;
 
@@ -246,11 +250,21 @@ pub async fn list_files(
     snapshot: String,
     path: String,
 ) -> Result<Vec<FileEntry>, BackrCommandError> {
+    // Validate all user-supplied identifiers before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+    validate_remote_component(&snapshot).map_err(|e| BackrCommandError::invalid_input(e))?;
+    // The path argument may be empty (means snapshot root) or a relative subpath.
+    if !path.is_empty() && path != "." {
+        validate_relative_path(path.trim().trim_start_matches('/'))
+            .map_err(|e| BackrCommandError::invalid_input(e))?;
+    }
+
     /* AppState::require_config returns the cloned Config or a NotConfigured error. */
     let cfg = state.require_config().await?;
 
     /* config::known_hosts_path resolves the isolated SSH known_hosts file path. */
     let known = config::known_hosts_path().map_err(BackrCommandError::from)?;
+
 
     let normalized = if path.is_empty() || path == "." {
         String::new()
@@ -302,22 +316,26 @@ pub async fn read_snapshot_file(
     snapshot: String,
     relative_path: String,
 ) -> Result<SnapshotFileContents, BackrCommandError> {
+    // Validate all user-supplied identifiers before any config load or SSH call.
+    // `validate_remote_component` covers the project/snapshot traversal check;
+    // `is_valid_snapshot_name` adds the timestamp-format semantic guard on snapshot.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+    validate_remote_component(&snapshot).map_err(|e| BackrCommandError::invalid_input(e))?;
     if !is_valid_snapshot_name(&snapshot) {
-        return Err(BackrCommandError::invalid_input(
-            "invalid snapshot folder name",
-        ));
+        return Err(BackrCommandError::invalid_input("invalid snapshot folder name"));
     }
+
+    // Strip a leading '/' so callers may pass either form; then validate the
+    // normalized path. `validate_relative_path` covers both `..` alone and embedded
+    // `..` segments, superseding the previous manual `..` guard.
+    let normalized = relative_path.trim().trim_start_matches('/').to_string();
+    validate_relative_path(&normalized).map_err(|e| BackrCommandError::invalid_input(e))?;
 
     /* AppState::require_config returns the cloned Config or a NotConfigured error. */
     let cfg = state.require_config().await?;
 
     /* config::known_hosts_path resolves the isolated SSH known_hosts file path. */
     let known = config::known_hosts_path().map_err(BackrCommandError::from)?;
-
-    let normalized = relative_path.trim().trim_start_matches('/').to_string();
-    if normalized.contains("..") {
-        return Err(BackrCommandError::invalid_input("invalid path"));
-    }
 
     /* ssh::remote_read_file_bytes fetches up to `max_bytes` from a remote file via SSH. */
     let bytes = ssh::remote_read_file_bytes(
@@ -358,6 +376,10 @@ pub async fn restore_snapshot(
     project: String,
     snapshot: String,
 ) -> Result<String, BackrCommandError> {
+    // Validate both identifiers before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+    validate_remote_component(&snapshot).map_err(|e| BackrCommandError::invalid_input(e))?;
+
     /* AppState::require_config returns the cloned Config or a NotConfigured error. */
     let cfg = state.require_config().await?;
 
@@ -381,6 +403,9 @@ pub async fn restore_all_snapshots(
     state: State<'_, Arc<AppState>>,
     project: String,
 ) -> Result<Vec<String>, BackrCommandError> {
+    // Validate `project` before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+
     /* AppState::require_config returns the cloned Config or a NotConfigured error. */
     let cfg = state.require_config().await?;
 

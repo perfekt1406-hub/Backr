@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::backup::rsync::{self, remote_snapshot_dest_folder};
 use crate::backup::ssh;
+use crate::backup::validate::validate_remote_component;
 use crate::config::{self, Config};
 use crate::error::{BackrCommandError, BackrError};
 use crate::progress_sink::{AppEmitProgress, SharedProgress};
@@ -242,6 +243,10 @@ pub async fn run_backup(
     state: State<'_, Arc<AppState>>,
     project: Option<String>,
 ) -> Result<(), BackrCommandError> {
+    // Validate the optional project name before dispatching — rejects traversal attempts.
+    if let Some(ref p) = project {
+        validate_remote_component(p).map_err(|e| BackrCommandError::invalid_input(e))?;
+    }
     spawn_backup_job(&app, state.inner(), project)
 }
 
