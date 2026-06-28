@@ -274,6 +274,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backrd"
+version = "0.1.0"
+dependencies = [
+ "backr-core",
+ "chrono",
+ "dirs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
