@@ -1,0 +1,32 @@
+# backr-core — shared library crate for the Backr project.
+# Contains core backup logic, configuration types, pairing protocol, and error types
+# that will be shared between backrd (daemon), backr-app (Tauri GUI), and backr-cli.
+# All dependency versions are inherited from the workspace root Cargo.toml.
+
+[package]
+name = "backr-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Core library shared between backrd daemon, backr-app, and backr-cli."
+
+[lib]
+name = "backr_core"
+
+[dependencies]
+# All versions inherited from [workspace.dependencies] in the root Cargo.toml.
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+toml               = { workspace = true }
+chrono             = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+regex              = { workspace = true }
+once_cell          = { workspace = true }
+dirs               = { workspace = true }
+shell-escape       = { workspace = true }
+shellexpand        = { workspace = true }
+rand               = { workspace = true }
+tiny_http          = { workspace = true }
+mdns-sd            = { workspace = true }
