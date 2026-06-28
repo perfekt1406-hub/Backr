@@ -1,16 +1,27 @@
 /*
  * ipc/mod.rs — Unix socket connection handler for the backrd IPC server.
  *
- * Each accepted `UnixStream` is handed to `handle_connection`, which runs an
- * NDJSON read-dispatch-write loop until the client disconnects or an
- * unrecoverable I/O error occurs. One Tokio task is spawned per connection so
- * clients are fully independent.
+ * Each accepted `UnixStream` is handed to `handle_connection`, which runs three
+ * concurrent sub-tasks per connection:
+ *
+ *   1. **Read-dispatch loop** — reads NDJSON requests from the client, dispatches
+ *      them to `handlers::dispatch`, and queues the serialised response on the
+ *      shared write channel.
+ *   2. **Event-forward task** — receives `IpcEvent` messages from a broadcast
+ *      channel (produced by `IpcBroadcastSink`) and queues them on the same
+ *      shared write channel.
+ *   3. **Writer task** — drains an unbounded MPSC channel of JSON-serialised lines
+ *      and writes them to the socket in order, appending `\n` to each.
+ *
+ * Using a single MPSC write channel means the socket write half never needs to be
+ * shared or locked — only the writer task touches it.
  *
  * Protocol summary (one JSON object per `\n`-terminated line):
  *   Client → Daemon : {"id": "<uuid>", "method": "<name>", "params": {…}}
- *   Daemon → Client : {"id": "<uuid>", "result": {…}}     (success)
- *                   | {"id": "<uuid>", "error": {…}}      (handler error)
- *                   | {"id": null,     "error": {…}}      (parse failure)
+ *   Daemon → Client : {"id": "<uuid>", "result": {…}}      (success)
+ *                   | {"id": "<uuid>", "error": {…}}       (handler error)
+ *                   | {"event": "<name>", "data": {…}}     (push event)
+ *                   | {"id": "null",     "error": {…}}     (parse failure)
  */
 
 pub mod handlers;
@@ -20,22 +31,72 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, warn};
 
 use crate::daemon_state::DaemonState;
-use crate::ipc::protocol::{IpcError, IpcRequest, IpcResponse};
+use crate::ipc::protocol::{IpcError, IpcEvent, IpcRequest, IpcResponse};
 
 /// Drives the NDJSON read-dispatch-write loop for a single client connection.
 ///
-/// The function returns when the client sends EOF, closes the connection, or an
-/// I/O error prevents further communication.
+/// Spawns an event-forwarder task and a socket-writer task alongside the
+/// read-dispatch loop so all three can proceed concurrently.  Returns when the
+/// client sends EOF, closes the connection, or a write error terminates the
+/// writer task; all helper tasks are aborted on exit.
 ///
 /// # Parameters
-/// - `stream` — The accepted Unix domain socket stream.
-/// - `state`  — Shared daemon state passed into each handler.
-pub async fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) {
-    // Split the stream so we can read and write concurrently from the same socket.
-    let (read_half, mut write_half) = stream.into_split();
+/// - `stream`   — The accepted Unix domain socket stream.
+/// - `state`    — Shared daemon state passed into each handler.
+/// - `event_rx` — Subscription to the daemon-wide `IpcEvent` broadcast channel;
+///                events received here are forwarded to this connection's socket.
+pub async fn handle_connection(
+    stream: UnixStream,
+    state: Arc<DaemonState>,
+    event_rx: broadcast::Receiver<IpcEvent>,
+) {
+    // Split the stream so the reader and writer can operate concurrently.
+    let (read_half, write_half) = stream.into_split();
+
+    // Single-writer channel: both the request dispatcher and the event forwarder
+    // send serialised JSON lines here; the writer task drains this channel.
+    let (write_tx, write_rx) = mpsc::unbounded_channel::<String>();
+
+    // Spawn the socket writer task.
+    let writer_handle = tokio::spawn(run_writer(write_half, write_rx));
+
+    // Spawn the event forwarder task (broadcast → write channel).
+    let fwd_tx = write_tx.clone();
+    let forwarder_handle = tokio::spawn(run_event_forwarder(event_rx, fwd_tx));
+
+    // Run the request read-dispatch loop on the current task.
+    run_request_loop(read_half, state, write_tx).await;
+
+    // When the reader loop exits (client EOF or error), abort the helpers.
+    forwarder_handle.abort();
+    writer_handle.abort();
+
+    // Drain both task results (they were aborted so they finish immediately).
+    let _ = tokio::join!(forwarder_handle, writer_handle);
+}
+
+// ---------------------------------------------------------------------------
+// Inner task functions
+// ---------------------------------------------------------------------------
+
+/// Reads NDJSON requests from the socket, dispatches each to a handler, and
+/// queues the serialised response on `write_tx`.
+///
+/// Returns when the client sends EOF or a read error occurs.
+///
+/// # Parameters
+/// - `read_half` — Owned read half of the Unix socket.
+/// - `state`     — Shared daemon state.
+/// - `write_tx`  — MPSC sender to the socket writer task.
+async fn run_request_loop(
+    read_half: tokio::net::unix::OwnedReadHalf,
+    state: Arc<DaemonState>,
+    write_tx: mpsc::UnboundedSender<String>,
+) {
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
 
@@ -66,8 +127,8 @@ pub async fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) {
             Ok(r) => r,
             Err(e) => {
                 let response = malformed_request_response(e);
-                if let Err(write_err) = write_response(&mut write_half, &response).await {
-                    error!("ipc: failed to write parse-error response: {write_err}");
+                if send_json(&write_tx, &response).is_err() {
+                    // Writer task is gone — no point continuing.
                     break;
                 }
                 continue;
@@ -76,14 +137,72 @@ pub async fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) {
 
         debug!("ipc: {} → method={}", request.id, request.method);
 
-        // Dispatch to the appropriate handler stub.
-        let response = match handlers::dispatch(&request.method, request.params, Arc::clone(&state)).await {
-            Ok(result) => IpcResponse::ok(&request.id, result),
-            Err(err) => IpcResponse::err(&request.id, err),
-        };
+        // Dispatch to the appropriate handler.
+        let response =
+            match handlers::dispatch(&request.method, request.params, Arc::clone(&state)).await {
+                Ok(result) => IpcResponse::ok(&request.id, result),
+                Err(err) => IpcResponse::err(&request.id, err),
+            };
 
-        if let Err(e) = write_response(&mut write_half, &response).await {
-            error!("ipc: failed to write response for {}: {e}", request.id);
+        if send_json(&write_tx, &response).is_err() {
+            error!("ipc: writer task closed for {}", request.id);
+            break;
+        }
+    }
+}
+
+/// Forwards `IpcEvent` messages from the broadcast channel to the connection's
+/// write channel until the broadcast sender is dropped or the write channel closes.
+///
+/// Lagged messages (receiver too slow) are logged and skipped; the broadcast
+/// receiver handles the lag internally without needing a manual re-subscribe.
+///
+/// # Parameters
+/// - `event_rx` — Broadcast receiver subscription for this connection.
+/// - `write_tx` — MPSC sender to the per-connection socket writer task.
+async fn run_event_forwarder(
+    mut event_rx: broadcast::Receiver<IpcEvent>,
+    write_tx: mpsc::UnboundedSender<String>,
+) {
+    loop {
+        match event_rx.recv().await {
+            Ok(event) => {
+                if send_json(&write_tx, &event).is_err() {
+                    // Writer is gone — connection is closing.
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                // The connection handler fell behind; skip the missed events and continue.
+                warn!("ipc: event forwarder skipped {n} lagged events");
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                // Broadcast sender dropped (daemon shutting down).
+                break;
+            }
+        }
+    }
+}
+
+/// Drains the MPSC write channel and writes each line to the socket, appending `\n`.
+///
+/// Returns when the channel is closed (all senders dropped) or a write error occurs.
+///
+/// # Parameters
+/// - `write_half` — Owned write half of the Unix socket.
+/// - `write_rx`   — MPSC receiver; each message is a complete JSON line (no trailing `\n`).
+async fn run_writer(
+    mut write_half: tokio::net::unix::OwnedWriteHalf,
+    mut write_rx: mpsc::UnboundedReceiver<String>,
+) {
+    while let Some(mut json) = write_rx.recv().await {
+        json.push('\n');
+        if let Err(e) = write_half.write_all(json.as_bytes()).await {
+            error!("ipc: socket write error: {e}");
+            break;
+        }
+        if let Err(e) = write_half.flush().await {
+            error!("ipc: socket flush error: {e}");
             break;
         }
     }
@@ -93,21 +212,22 @@ pub async fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Serialises `response` to JSON, appends `\n`, and flushes it onto `writer`.
+/// Serialises `value` to a JSON string and sends it into `write_tx`.
 ///
-/// Returns an I/O error if serialisation or the write itself fails.
-async fn write_response(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    response: &IpcResponse,
-) -> std::io::Result<()> {
-    // Serialisation failure is an internal bug; convert to an I/O error so the
-    // caller can treat it uniformly.
-    let mut json = serde_json::to_string(response).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("serialise error: {e}"))
+/// Returns `Err(())` if serialisation fails (internal bug) or if the channel is
+/// closed (writer task gone).
+///
+/// # Parameters
+/// - `write_tx` — MPSC sender to the socket writer task.
+/// - `value`    — Any `serde::Serialize` value to send as a JSON line.
+fn send_json<T: serde::Serialize>(
+    write_tx: &mpsc::UnboundedSender<String>,
+    value: &T,
+) -> Result<(), ()> {
+    let json = serde_json::to_string(value).map_err(|e| {
+        error!("ipc: serialise error: {e}");
     })?;
-    json.push('\n');
-    writer.write_all(json.as_bytes()).await?;
-    writer.flush().await
+    write_tx.send(json).map_err(|_| ())
 }
 
 /// Builds the error response emitted when a client sends malformed JSON.
@@ -115,6 +235,9 @@ async fn write_response(
 /// Uses a literal `"null"` id string because we could not parse a real id from
 /// the broken request; clients should treat `"null"` as the sentinel for a
 /// parse-level failure.
+///
+/// # Parameters
+/// - `parse_err` — The `serde_json` error describing why the request was invalid.
 fn malformed_request_response(parse_err: serde_json::Error) -> IpcResponse {
     IpcResponse::err(
         "null",
