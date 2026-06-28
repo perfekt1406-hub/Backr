@@ -6,6 +6,7 @@
 members = [
     "src-tauri",
     "crates/backr-core",
+    "crates/backrd",
 ]
 resolver = "2"
 
@@ -32,3 +33,4 @@ rand         = "0.9.4"
 tiny_http    = "0.12.0"
 mdns-sd      = "0.20.0"
 tokio-util   = { version = "0.7", features = ["rt"] }
+uuid         = { version = "1",    features = ["v4"] }
