@@ -1,6 +1,10 @@
 /*
  * Periodic backup scheduler built on Tokio timers and cancellation tokens.
  * Restarts cleanly whenever configuration is saved so interval edits apply immediately.
+ *
+ * TODO(U5): add catch-up logic so a backup missed while the machine was asleep or
+ * the app was closed runs promptly on the next wake, rather than waiting a full
+ * interval again.
  */
 
 use std::sync::Arc;

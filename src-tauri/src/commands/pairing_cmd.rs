@@ -1,9 +1,13 @@
 /*
  * Host-side pairing commands.
  *
- * `start_pairing` opens a time-boxed window: generates a 6-digit code, binds an
- * ephemeral pairing listener, advertises this host over mDNS, and auto-tears down
- * after the TTL. `stop_pairing` / `pairing_status` manage and report that window.
+ * `start_pairing` opens a pairing window: generates a 6-digit code, binds an
+ * ephemeral pairing listener, and advertises this host over mDNS. The window
+ * stays open until a laptop pairs successfully or `stop_pairing` is called.
+ * `stop_pairing` / `pairing_status` manage and report that window.
+ *
+ * TODO(U2): add a real 3-minute TTL that auto-tears down the window even when
+ * neither a pair nor an explicit stop occurs.
  */
 
 use std::sync::Arc;
