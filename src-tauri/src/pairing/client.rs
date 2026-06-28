@@ -2,9 +2,13 @@
  * Client-side pairing.
  *
  * Ensures this laptop has an SSH key, sends its public key + the 6-digit code to a
- * discovered host's pairing listener, pins the host's public key into the isolated
- * known_hosts, and returns a prefilled Config draft for the setup wizard. The HTTP
- * client is hand-rolled (both ends are ours; plain HTTP/1.1 with Connection: close).
+ * discovered host's pairing listener, and returns a `PairDraft` containing the
+ * prefilled Config draft AND the host's SSH key fingerprint for out-of-band user
+ * verification. The config is NOT persisted here — the caller must call
+ * `confirm_pairing` after the user confirms the fingerprint.
+ *
+ * The HTTP client is hand-rolled (both ends are ours; plain HTTP/1.1 with Connection: close).
+ * Known-host pinning is deferred to `confirm_pair_draft` so it only happens on confirmed pairs.
  */
 
 use std::fs;
@@ -14,7 +18,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{
     known_hosts_path, Config, LocalConfig, RemoteConfig, ScheduleConfig, StateConfig,
@@ -29,9 +33,29 @@ struct PairReply {
     backup_root: String,
     #[serde(default)]
     host_pubkey: String,
+    /// SHA256 fingerprint string (e.g. `SHA256:abc...`) for user verification.
+    #[serde(default)]
+    host_key_fingerprint: String,
     /// Resolvable mDNS hostname (e.g. `archlinux.local`); empty on older hosts.
     #[serde(default)]
     hostname: String,
+}
+
+/// Intermediate result of a successful pair POST: the prefilled config draft and the
+/// host's SSH key fingerprint so the user can verify authenticity before the config
+/// is saved. Pass the entire struct to `confirm_pair_draft` after user confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairDraft {
+    /// The prefilled config to be saved after user confirms the fingerprint.
+    pub config: Config,
+    /// SHA256 fingerprint of the host's SSH key (e.g. `SHA256:abc...`).
+    /// Should match what is displayed on the host's Backr screen.
+    pub host_key_fingerprint: String,
+    /// Full SSH host public key line to pin into known_hosts on confirmation.
+    /// Kept here so the pin step and the config-save step are atomic from the UI's view.
+    pub host_pubkey: String,
+    /// The resolved SSH target (IP or mDNS name) the client will connect to.
+    pub ssh_target: String,
 }
 
 /// Returns true when `host` resolves to at least one address (mDNS/DNS/hosts).
@@ -52,8 +76,19 @@ fn hostname_resolves(host: &str, port: u16) -> bool {
 }
 
 /// Pairs with a discovered host at `address` ("ip:port") using `code`: ensures a local
-/// SSH key, submits the public key, pins the host key, and returns a prefilled config.
-pub fn pair_with_host(address: &str, code: &str) -> Result<Config, String> {
+/// SSH key, submits the public key, and returns a `PairDraft` containing the prefilled
+/// config and the host's SSH key fingerprint for user verification. Known-host pinning
+/// is deferred to `confirm_pair_draft` so it only happens after the user confirms.
+///
+/// # Inputs
+///
+/// * `address` — "ip:port" of the host's pairing listener, from `discover_hosts`.
+/// * `code`    — 6-digit pairing code shown on the host screen.
+///
+/// # Returns
+///
+/// `PairDraft` on success, or a human-readable error string on failure.
+pub fn pair_with_host(address: &str, code: &str) -> Result<PairDraft, String> {
     let pubkey = ensure_ssh_key()?;
     let key_path = ssh_key_path()?.to_string_lossy().to_string();
 
@@ -81,15 +116,11 @@ pub fn pair_with_host(address: &str, code: &str) -> Result<Config, String> {
         host_ip
     };
 
-    // Pin the host key under the exact target we'll connect with so StrictHostKeyChecking
-    // verifies regardless of the host's current IP.
-    if !reply.host_pubkey.trim().is_empty() {
-        pin_known_host(&ssh_target, reply.host_pubkey.trim())?;
-    }
-
-    Ok(Config {
+    // Build the config draft but do NOT pin the known_host or save yet — the user must
+    // first verify the fingerprint shown here matches what is displayed on the host screen.
+    let config = Config {
         remote: RemoteConfig {
-            host: ssh_target,
+            host: ssh_target.clone(),
             user: reply.ssh_user,
             ssh_key: key_path,
             port: reply.ssh_port,
@@ -102,7 +133,34 @@ pub fn pair_with_host(address: &str, code: &str) -> Result<Config, String> {
         state: StateConfig {
             last_backup_at: None,
         },
+    };
+
+    Ok(PairDraft {
+        config,
+        host_key_fingerprint: reply.host_key_fingerprint,
+        host_pubkey: reply.host_pubkey,
+        ssh_target,
     })
+}
+
+/// Finalizes a confirmed pair: pins the host public key into known_hosts and returns the
+/// ready-to-save config. Call this ONLY after the user has verified the fingerprint shown
+/// in `PairDraft::host_key_fingerprint` against the host screen.
+///
+/// # Inputs
+///
+/// * `draft` — the `PairDraft` returned by `pair_with_host`.
+///
+/// # Returns
+///
+/// The finalized `Config` on success, or a human-readable error string on failure.
+pub fn confirm_pair_draft(draft: PairDraft) -> Result<Config, String> {
+    // Pin the host key under the exact target we'll connect with so StrictHostKeyChecking
+    // verifies regardless of the host's current IP.
+    if !draft.host_pubkey.trim().is_empty() {
+        pin_known_host(&draft.ssh_target, draft.host_pubkey.trim())?;
+    }
+    Ok(draft.config)
 }
 
 fn ssh_key_path() -> Result<PathBuf, String> {
