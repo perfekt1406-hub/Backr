@@ -559,6 +559,62 @@ install_connecting_os_packages() {
 }
 
 #
+# Ensures mDNS (.local) name resolution works so backups can target the backup host by
+# its avahi hostname (e.g. archlinux.local) and keep working across DHCP IP changes.
+# Installs avahi + nss-mdns for the detected backend, adds mdns to the nsswitch hosts
+# line, and enables the avahi daemon. Best-effort: warns instead of failing setup so a
+# distro without these packages still installs (backups then fall back to the paired IP).
+#
+ensure_mdns_resolution() {
+  local backend
+  backend="$(detect_pkg_backend)"
+  echo "Ensuring mDNS (.local) resolution so backups follow the host across IP changes …"
+  case "$backend" in
+    apt)     run_privileged apt-get install -y avahi-daemon libnss-mdns || true ;;
+    dnf)     run_privileged dnf install -y avahi nss-mdns || true ;;
+    yum)     run_privileged yum install -y avahi nss-mdns || true ;;
+    pacman)  run_privileged pacman -S --noconfirm --needed avahi nss-mdns || true ;;
+    zypper)  run_privileged zypper --non-interactive install -y avahi nss-mdns || true ;;
+    apk)     run_privileged apk add --no-cache avahi avahi-tools || true ;;
+    *)       echo "warning: unknown package backend for mDNS; if .local fails, back up by IP." >&2 ;;
+  esac
+  ensure_nsswitch_mdns
+  enable_avahi_daemon
+}
+
+#
+# Adds nss-mdns to /etc/nsswitch.conf's hosts line when absent so glibc (and thus ssh/
+# rsync) resolves `.local` names. Debian's libnss-mdns auto-configures this, but Arch and
+# others do not. Inserts `mdns4_minimal [NOTFOUND=return]` right after `files`.
+#
+ensure_nsswitch_mdns() {
+  local f=/etc/nsswitch.conf
+  [[ -f "$f" ]] || { echo "warning: ${f} missing; cannot enable mdns resolution." >&2; return 0; }
+  if grep -qE '^hosts:.*mdns' "$f"; then
+    echo "nsswitch.conf already resolves mdns."
+    return 0
+  fi
+  run_privileged sed -i -E '/^hosts:/{ /mdns/! s/\bfiles\b/files mdns4_minimal [NOTFOUND=return]/ }' "$f" \
+    && echo "Added mdns4_minimal to ${f} hosts line." \
+    || echo "warning: could not edit ${f}; add 'mdns4_minimal [NOTFOUND=return]' to the hosts line manually." >&2
+}
+
+#
+# Enables and starts the avahi daemon (systemd or OpenRC) so this machine can resolve
+# and be resolved by `.local` names. Best-effort.
+#
+enable_avahi_daemon() {
+  if command -v systemctl &>/dev/null; then
+    run_privileged systemctl enable --now avahi-daemon 2>/dev/null \
+      || run_privileged systemctl enable --now avahi-daemon.service 2>/dev/null \
+      || echo "warning: could not enable avahi-daemon; start it manually for .local resolution." >&2
+  elif command -v rc-update &>/dev/null; then
+    run_privileged rc-update add avahi-daemon default 2>/dev/null || true
+    run_privileged rc-service avahi-daemon start 2>/dev/null || true
+  fi
+}
+
+#
 # Runs npm ci when lockfile exists, otherwise npm install, at repo root.
 #
 install_node_project_deps() {
@@ -1183,10 +1239,12 @@ main() {
       remove_existing_install_if_present
       clear_host_marker_for_client
       install_appimage_from_network
+      ensure_mdns_resolution
       print_install_done
       ;;
     deps)
       install_connecting_os_packages
+      ensure_mdns_resolution
       ensure_nodejs
       ensure_rust_toolchain
       ensure_projects_dir
@@ -1197,6 +1255,7 @@ main() {
       remove_existing_install_if_present
       clear_host_marker_for_client
       install_app_build_and_integrate
+      ensure_mdns_resolution
       print_install_done
       ;;
     *)

@@ -1535,6 +1535,45 @@ EOF
 EOF
 }
 
+#
+# Ensures this host publishes its `.local` mDNS name (e.g. archlinux.local) so paired
+# laptops can reach it by name and keep backing up across DHCP IP changes. Installs and
+# enables avahi (+ nss-mdns so the host resolves `.local` too) and adds mdns to nsswitch
+# on distros that don't auto-configure it. Best-effort: warns instead of failing setup.
+#
+ensure_host_mdns_publish() {
+  local backend
+  backend="$(detect_pkg_backend)"
+  echo "Ensuring this host publishes its .local mDNS name (so laptops follow IP changes) …"
+  case "$backend" in
+    apt)    run_cmd apt-get install -y avahi-daemon libnss-mdns || true ;;
+    dnf)    run_cmd dnf install -y avahi nss-mdns || true ;;
+    yum)    run_cmd yum install -y avahi nss-mdns || true ;;
+    pacman) run_cmd pacman -S --noconfirm --needed avahi nss-mdns || true ;;
+    zypper) run_cmd zypper --non-interactive install -y avahi nss-mdns || true ;;
+    apk)    run_cmd apk add --no-cache avahi avahi-tools || true ;;
+    *)      echo "warning: unknown package backend for mDNS; laptops may need to reach this host by IP." >&2 ;;
+  esac
+
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+
+  local nss=/etc/nsswitch.conf
+  if [[ -f "$nss" ]] && ! grep -qE '^hosts:.*mdns' "$nss"; then
+    sed -i -E '/^hosts:/{ /mdns/! s/\bfiles\b/files mdns4_minimal [NOTFOUND=return]/ }' "$nss" \
+      && echo "Added mdns4_minimal to ${nss}." \
+      || echo "warning: could not edit ${nss}; add mdns4_minimal to the hosts line manually." >&2
+  fi
+
+  if command -v systemctl &>/dev/null; then
+    systemctl enable --now avahi-daemon 2>/dev/null \
+      || systemctl enable --now avahi-daemon.service 2>/dev/null \
+      || echo "warning: could not enable avahi-daemon; start it manually so the .local name is published." >&2
+  elif command -v rc-update &>/dev/null; then
+    rc-update add avahi-daemon default 2>/dev/null || true
+    rc-service avahi-daemon start 2>/dev/null || true
+  fi
+}
+
 main() {
   parse_args "$@"
   require_linux_root
@@ -1542,6 +1581,7 @@ main() {
   run_backup_host_questionnaire
 
   install_server_ssh_rsync "$DRY_RUN"
+  ensure_host_mdns_publish
   ensure_sshd_includes_drop_in_dir
   ensure_user_exists
   ensure_backup_tree

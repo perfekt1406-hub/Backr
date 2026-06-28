@@ -40,6 +40,10 @@ pub struct HostPairInfo {
     pub host_key_fingerprint: String,
     /// Full SSH host public key line the client pins into known_hosts.
     pub host_pubkey: String,
+    /// Resolvable mDNS hostname (e.g. `archlinux.local`). The client stores this as the
+    /// SSH target when it resolves, so backups follow the host across DHCP IP changes
+    /// instead of breaking when the leased address changes.
+    pub hostname: String,
 }
 
 /// Why a pair attempt was refused.
@@ -89,6 +93,9 @@ pub fn gather_host_info() -> Result<HostPairInfo, String> {
         backup_root: marker.backup_root,
         host_key_fingerprint: host_key_fingerprint().unwrap_or_default(),
         host_pubkey: host_pubkey_line().unwrap_or_default(),
+        // mDNS publishes `<short-hostname>.local`; report it so the client can target the
+        // host by name and survive IP changes (see HostPairInfo::hostname).
+        hostname: format!("{}.local", crate::pairing::discovery::hostname_short()),
     })
 }
 
@@ -232,6 +239,7 @@ mod tests {
             backup_root: "/srv/backr".into(),
             host_key_fingerprint: "SHA256:abc".into(),
             host_pubkey: "ssh-ed25519 AAAAHOSTKEY host".into(),
+            hostname: "testhost.local".into(),
         }
     }
 

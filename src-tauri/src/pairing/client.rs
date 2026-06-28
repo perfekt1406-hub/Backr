@@ -29,6 +29,26 @@ struct PairReply {
     backup_root: String,
     #[serde(default)]
     host_pubkey: String,
+    /// Resolvable mDNS hostname (e.g. `archlinux.local`); empty on older hosts.
+    #[serde(default)]
+    hostname: String,
+}
+
+/// Returns true when `host` resolves to at least one address (mDNS/DNS/hosts).
+///
+/// # Inputs
+///
+/// * `host` — bare hostname (no port).
+/// * `port` — any port; only used to form a socket-addr query for `getaddrinfo`.
+///
+/// Used at pairing time to decide whether the host's `.local` name is usable on this
+/// network before we commit to storing it as the SSH target.
+fn hostname_resolves(host: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    (host, port)
+        .to_socket_addrs()
+        .map(|mut addrs| addrs.next().is_some())
+        .unwrap_or(false)
 }
 
 /// Pairs with a discovered host at `address` ("ip:port") using `code`: ensures a local
@@ -49,14 +69,27 @@ pub fn pair_with_host(address: &str, code: &str) -> Result<Config, String> {
     let reply: PairReply =
         serde_json::from_str(&resp_body).map_err(|e| format!("bad pair reply: {e}"))?;
 
-    let host_only = address.split(':').next().unwrap_or(address).to_string();
+    let host_ip = address.split(':').next().unwrap_or(address).to_string();
+
+    // Prefer the host's mDNS name so backups follow it across DHCP IP changes, but only
+    // when it actually resolves on this network (avahi/nss-mdns present). Otherwise fall
+    // back to the paired IP — correct today, even if it goes stale on the next reboot.
+    let hostname = reply.hostname.trim();
+    let ssh_target = if !hostname.is_empty() && hostname_resolves(hostname, reply.ssh_port) {
+        hostname.to_string()
+    } else {
+        host_ip
+    };
+
+    // Pin the host key under the exact target we'll connect with so StrictHostKeyChecking
+    // verifies regardless of the host's current IP.
     if !reply.host_pubkey.trim().is_empty() {
-        pin_known_host(&host_only, reply.host_pubkey.trim())?;
+        pin_known_host(&ssh_target, reply.host_pubkey.trim())?;
     }
 
     Ok(Config {
         remote: RemoteConfig {
-            host: host_only,
+            host: ssh_target,
             user: reply.ssh_user,
             ssh_key: key_path,
             port: reply.ssh_port,
