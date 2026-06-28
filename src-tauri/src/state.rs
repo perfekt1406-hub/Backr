@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::error::BackrCommandError;
 use crate::pairing::code::PairingSession;
 use crate::pairing::PairingRuntime;
 
@@ -32,6 +33,23 @@ pub struct AppState {
     pub pairing: Mutex<Option<PairingSession>>,
     /// Live mDNS + listener resources while a pairing window is open.
     pub pairing_runtime: Mutex<Option<PairingRuntime>>,
+}
+
+impl AppState {
+    /// Returns a clone of the loaded [`Config`], or a typed `NotConfigured` error when the
+    /// application has not yet been set up.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Config)` when configuration has been saved; `Err(BackrCommandError::NotConfigured)`
+    /// otherwise.
+    pub async fn require_config(&self) -> Result<Config, BackrCommandError> {
+        self.config
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(BackrCommandError::not_configured)
+    }
 }
 
 impl Default for AppState {

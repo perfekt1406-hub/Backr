@@ -1,5 +1,8 @@
 /*
  * Commands that enumerate local projects and report aggregate backup scheduling state.
+ *
+ * All commands return `Result<T, BackrCommandError>` so the frontend receives a typed
+ * `{ kind, message }` error object rather than a bare string.
  */
 
 use std::path::Path;
@@ -9,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::State;
 
-use crate::error::BackrError;
+use crate::error::{BackrCommandError, BackrError};
 use crate::project_snapshot_cache::{self, load_snapshot_cache, remote_cache_key, save_snapshot_cache};
 use crate::state::AppState;
 
@@ -44,9 +47,10 @@ pub struct BackupStatus {
 ///
 /// # Inputs
 ///
-/// * `probe_remote` — when `Some(true)`, probes SSH for live snapshot listings and refreshes disk cache;
-///   when `None` or `Some(false)`, uses **only** local project folders plus [`crate::project_snapshot_cache`]
-///   so the dashboard works off-grid without hanging on SSH (after backups or an explicit remote refresh).
+/// * `probe_remote` — when `Some(true)`, probes SSH for live snapshot listings and refreshes disk
+///   cache; when `None` or `Some(false)`, uses **only** local project folders plus
+///   [`crate::project_snapshot_cache`] so the dashboard works off-grid without hanging on SSH
+///   (after backups or an explicit remote refresh).
 ///
 /// # Returns
 ///
@@ -55,22 +59,21 @@ pub struct BackupStatus {
 pub async fn list_projects(
     state: State<'_, Arc<AppState>>,
     probe_remote: Option<bool>,
-) -> Result<Vec<ProjectInfo>, String> {
+) -> Result<Vec<ProjectInfo>, BackrCommandError> {
     let probe_remote = probe_remote.unwrap_or(false);
-    let cfg = {
-        let g = state.config.lock().await;
-        g.clone()
-            .ok_or_else(|| "configure the application before listing projects".to_string())?
-    };
+    /* AppState::require_config returns the cloned Config or a NotConfigured error. */
+    let cfg = state.require_config().await?;
+
     let base = Path::new(&cfg.local.projects_path);
     if !base.exists() {
-        return Err(format!(
+        return Err(BackrCommandError::io(format!(
             "projects path does not exist: {}",
             cfg.local.projects_path
-        ));
+        )));
     }
+
     let mut names: Vec<String> = std::fs::read_dir(base)
-        .map_err(|e: std::io::Error| e.to_string())?
+        .map_err(BackrCommandError::from)?
         .filter_map(Result::ok)
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
@@ -116,9 +119,12 @@ pub async fn list_projects(
         return Ok(out);
     }
 
-    let known_hosts = crate::config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+    /* crate::config::known_hosts_path resolves the isolated SSH known_hosts file path. */
+    let known_hosts =
+        crate::config::known_hosts_path().map_err(|e: BackrError| BackrCommandError::from(e))?;
 
     for name in names {
+        /* ssh::remote_list_snapshot_names lists snapshots via SSH; returns BackrError on failure. */
         match crate::backup::ssh::remote_list_snapshot_names(
             &cfg.remote.ssh_key,
             &known_hosts,
@@ -179,11 +185,14 @@ pub async fn list_projects(
 ///
 /// # Returns
 ///
-/// A [`BackupStatus`] snapshot suitable for UI spinners and “next run” copy.
+/// A [`BackupStatus`] snapshot suitable for UI spinners and "next run" copy.
 #[tauri::command]
-pub async fn get_backup_status(state: State<'_, Arc<AppState>>) -> Result<BackupStatus, String> {
-    let cfg_opt = state.config.lock().await.clone();
-    let cfg = cfg_opt.ok_or_else(|| "not configured".to_string())?;
+pub async fn get_backup_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<BackupStatus, BackrCommandError> {
+    /* AppState::require_config returns the cloned Config or a NotConfigured error. */
+    let cfg = state.require_config().await?;
+
     let last_from_state = *state.last_backup_at.lock().await;
     let last_from_file = cfg.state.last_backup_at;
     let last_backup_at = last_from_state.or(last_from_file);
