@@ -32,6 +32,9 @@
 #   --no-appimage             Skip the Backr AppImage download and auto-launch (headless/server installs).
 #   --desktop-user USER       OS user who gets the Backr AppImage + .desktop entry (default: $SUDO_USER or first non-system user).
 #   --remove-old-files        Delete all existing backed-up snapshots under BACKR_ROOT before setup (cleans broken/partial backups).
+#                             When piping from curl, use the env var form or bash -s --:
+#                               BACKR_REMOVE_OLD_FILES=1 curl … | sudo bash
+#                               curl … | sudo bash -s -- --remove-old-files
 #   --dry-run                 Print actions only.
 #   --verbose                 Print detected OS/firewall/sshd diagnostics after setup.
 #   -h, --help                Show this text.
@@ -45,6 +48,7 @@
 #   BACKR_DEFAULT_APPIMAGE_URL    Override the built-in default release URL without pinning a specific build.
 #   BACKR_NO_HOST_APPIMAGE=1      Same as --no-appimage.
 #   BACKR_HOST_DESKTOP_USER       Same as --desktop-user.
+#   BACKR_REMOVE_OLD_FILES=1      Same as --remove-old-files (use this form when piping from curl).
 
 set -euo pipefail
 
@@ -53,7 +57,7 @@ BACKR_ROOT="${BACKR_ROOT:-/srv/backr}"
 DRY_RUN=0
 VERBOSE=0
 SKIP_FIREWALL=0
-REMOVE_OLD_FILES=0
+REMOVE_OLD_FILES="${BACKR_REMOVE_OLD_FILES:-0}"
 # Optional pubkey bootstrap (see append_trust_pubkeys_from_cli_or_env).
 TRUST_PUBKEY_FILE_CLI=""
 # Questionnaire / non-interactive (see run_backup_host_questionnaire).
