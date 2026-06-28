@@ -11,36 +11,58 @@ Desktop app that backs up your projects folder to a remote machine over SSH — 
 
 ## Setup (two machines, ~5 minutes)
 
-### 1. Backup host (NAS / server / spare PC) — run once as root
+### 1. Backup host (NAS / server / spare PC)
+
+Download and run the host setup script as root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh -o setup-backup-host.sh
+sudo bash setup-backup-host.sh
 ```
 
 Installs OpenSSH + rsync, creates the `backr` account and `/srv/backr`, configures sshd, and opens the Backr host dashboard. To connect a laptop, click **Trust keys → Add a laptop** — it shows a 6-digit pairing code.
 
-Use `--no-appimage` on headless servers (no desktop session), or `--verbose` to print OS/firewall/sshd diagnostics.
+**Flags:**
 
-### 2. Laptop — one command (builds from source)
+| Flag | Effect |
+|------|--------|
+| `--no-appimage` | Skip the Backr app download (headless/server installs with no desktop session). |
+| `--remove-old-files` | Delete all existing snapshots under `/srv/backr` before setup — use this to clear broken or partial backups. |
+| `--verbose` | Print OS/firewall/sshd diagnostics after setup. |
+| `--dry-run` | Print actions without executing them. |
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-connecting-client.sh | bash
+sudo bash setup-backup-host.sh --remove-old-files
+sudo bash setup-backup-host.sh --no-appimage --verbose
 ```
 
-Run as your **normal user** (not `sudo`) — it elevates per-command for package installs. It downloads the source, installs all build deps (Node, Rust, Tauri libs), builds a **native binary** (`tauri build --no-bundle`), and adds it to your app menu. Works on Debian/Ubuntu, Fedora, Arch-based, openSUSE, and Alpine.
+---
 
-Prefer a checkout? Clone and run the same script:
+### 2. Laptop
+
+Download and run the client setup script as your **normal user** (not `sudo`) — it elevates per-command for package installs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-connecting-client.sh -o setup-connecting-client.sh
+bash setup-connecting-client.sh
+```
+
+Downloads the source, installs all build deps (Node, Rust, Tauri libs), builds a **native binary** (`tauri build --no-bundle`), and adds it to your app menu. Works on Debian/Ubuntu, Fedora, Arch-based, openSUSE, and Alpine.
+
+Prefer a checkout?
 
 ```bash
 git clone https://github.com/perfekt1406-hub/Backr.git && cd Backr
 ./scripts/setup-connecting-client.sh
 ```
 
-On first launch Backr **scans the LAN for your host** (in pairing mode), you pick it and enter the **6-digit code**, and it generates your SSH key, gets it trusted on the host, pins the host key, and prefills the rest — no IP typing or key copying. If the host isn't found (some networks block mDNS), choose **Enter details manually** in the wizard; you can also trust a key by hand via **Trust keys** on the host.
+On first launch Backr **scans the LAN for your host** (in pairing mode), you pick it and enter the **6-digit code**, and it generates your SSH key, gets it trusted on the host, pins the host key, and prefills the rest — no IP typing or key copying. If the host isn't found (some networks block mDNS), choose **Enter details manually** in the wizard.
 
-> **Re-running updates:** running either setup command again rebuilds from the latest source and replaces the installed app (stopping any running instance first).
+> **Re-running reinstalls cleanly:** running the script again wipes the previous binary and config so the app opens in pairing mode, then rebuilds from the latest source.
 >
-> **Uninstall (laptop):** `./scripts/setup-connecting-client.sh --uninstall` removes the app, launcher entry, and icons (keeps your config, SSH keys, and toolchain).
+> **Uninstall (laptop):** `./scripts/setup-connecting-client.sh --uninstall` removes the app, launcher entry, and icons (keeps your SSH keys and toolchain).
+
+---
 
 ### 3. Open Backr on the laptop — it finds the host, you enter the code, done.
 
