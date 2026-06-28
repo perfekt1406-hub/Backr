@@ -24,10 +24,6 @@ use crate::state::AppState;
 pub struct SnapshotEntry {
     /// Remote directory name (timestamp string).
     pub name: String,
-    /// Best-effort directory mtime in seconds since UNIX epoch (if discoverable).
-    pub modified_unix: Option<f64>,
-    /// Total size in bytes (not computed here; reserved for future `du` integration).
-    pub size_bytes: Option<u64>,
 }
 
 /// One row in the lazy file tree (`list_files` payload).
@@ -237,11 +233,7 @@ pub async fn list_snapshots(
         if !is_valid_snapshot_name(&name) {
             continue;
         }
-        out.push(SnapshotEntry {
-            name,
-            modified_unix: None,
-            size_bytes: None,
-        });
+        out.push(SnapshotEntry { name });
     }
     Ok(out)
 }

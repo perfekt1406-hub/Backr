@@ -185,9 +185,5 @@ export function mockSnapshotFileContents(relativePath: string): SnapshotFileCont
 
 /** Synthetic snapshot rows for any project name (same timestamps for simpler QA). */
 export function mockSnapshotsForProject(_project: string): SnapshotEntry[] {
-  return MOCK_SNAPSHOT_NAMES.map((name) => ({
-    name,
-    modified_unix: null,
-    size_bytes: null,
-  }));
+  return MOCK_SNAPSHOT_NAMES.map((name) => ({ name }));
 }

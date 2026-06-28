@@ -8,7 +8,6 @@
 
   import * as commands from "../../lib/commands";
   import type { SnapshotEntry } from "../../types/snapshot";
-  import { compactTimestamp } from "../../lib/time";
 
   interface Props {
     project: string;
@@ -43,11 +42,6 @@
 >
   <div>
     <div class="font-mono text-[14px] text-[var(--text)]">{snap.name}</div>
-    {#if snap.modified_unix}
-      <div class="mt-1 text-[11px] uppercase tracking-[0.12em] text-[var(--muted)]">
-        Mtime {compactTimestamp(new Date(snap.modified_unix * 1000).toISOString())}
-      </div>
-    {/if}
   </div>
   <div class="flex flex-wrap gap-2">
     <a
