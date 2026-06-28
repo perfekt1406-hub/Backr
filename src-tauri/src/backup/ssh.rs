@@ -16,6 +16,7 @@ use regex::Regex;
 use shell_escape::escape;
 use tokio::process::Command;
 
+use crate::config::ssh_control_dir;
 use crate::error::BackrError;
 
 /// Joins remote argv tokens into a single shell-safe command string for OpenSSH.
@@ -148,7 +149,7 @@ pub async fn ssh_exec_trimmed(
     accept_new: bool,
     remote_argv: &[String],
 ) -> Result<String, BackrError> {
-    let mut cmd = ssh_base_command(ssh_key, known_hosts, accept_new, ssh_port);
+    let mut cmd = ssh_base_command_for_host(ssh_key, known_hosts, accept_new, ssh_port, host);
     cmd.arg(format!("{user}@{host}"));
     cmd.arg(join_remote_command(remote_argv));
     run_and_capture(cmd).await
@@ -196,7 +197,7 @@ pub async fn remote_read_file_bytes(
         max_bytes.to_string(),
         abs,
     ];
-    let mut cmd = ssh_base_command(ssh_key, known_hosts, true, ssh_port);
+    let mut cmd = ssh_base_command_for_host(ssh_key, known_hosts, true, ssh_port, host);
     cmd.arg(format!("{user}@{host}"));
     cmd.arg(join_remote_command(&argv));
     run_and_capture_stdout_exact(cmd).await
@@ -214,7 +215,7 @@ pub async fn test_connection(
     ssh_port: u16,
 ) -> Result<(), BackrError> {
     let known = crate::config::known_hosts_path()?;
-    let mut cmd = ssh_base_command(ssh_key, &known, true, ssh_port);
+    let mut cmd = ssh_base_command_for_host(ssh_key, &known, true, ssh_port, host);
     cmd.arg(format!("{user}@{host}"));
     cmd.arg("echo").arg("backr_ok");
     let out = run_and_capture(cmd).await?;
@@ -357,13 +358,134 @@ pub async fn remote_list_children(
     Ok(rows)
 }
 
-/// Builds the base `ssh` invocation shared by backup and inspection helpers.
+/// Builds the shell-safe `ssh` command string for `rsync -e` that includes ControlMaster options.
+///
+/// This is the unified builder used by both backup and restore rsync invocations, replacing the
+/// previous pair of `ssh_rsh_backup` / `ssh_rsh_restore` functions. The only behavioural
+/// difference between backup and restore is `StrictHostKeyChecking`, controlled by `accept_new`.
+///
+/// ControlMaster options are appended when the control socket directory is accessible. If not,
+/// the function silently returns a plain `ssh` string so the rsync transfer can still proceed.
 ///
 /// # Inputs
 ///
-/// * `accept_new` — enables accepting new host keys during backups.
-/// * `ssh_port` — target TCP port for `ssh`.
-fn ssh_base_command(ssh_key: &str, known_hosts: &Path, accept_new: bool, ssh_port: u16) -> Command {
+/// * `ssh_key` — expanded local private-key path.
+/// * `known_hosts` — Backr-isolated `known_hosts` path.
+/// * `ssh_port` — SSH server port number.
+/// * `host` — remote hostname or IP; used to derive the per-host ControlPath socket filename.
+/// * `accept_new` — `true` for backup (may encounter new host keys); `false` for restore
+///   (must only talk to already-trusted hosts).
+///
+/// # Returns
+///
+/// A single shell-safe string suitable for `rsync -e '<returned>'`.
+pub fn ssh_rsh_string(
+    ssh_key: &str,
+    known_hosts: &Path,
+    ssh_port: u16,
+    host: &str,
+    accept_new: bool,
+) -> String {
+    let key = escape(std::borrow::Cow::Borrowed(ssh_key));
+    let kh_owned = known_hosts.to_string_lossy().into_owned();
+    let kh = escape(std::borrow::Cow::Borrowed(kh_owned.as_str()));
+    let host_check = if accept_new {
+        "StrictHostKeyChecking=accept-new"
+    } else {
+        "StrictHostKeyChecking=yes"
+    };
+    // Base command without ControlMaster options.
+    let base = format!(
+        "ssh -p {ssh_port} -i {key} -o {host_check} -o BatchMode=yes -o UserKnownHostsFile={kh}"
+    );
+
+    // Append ControlMaster options when the socket directory is available. If not, fall back
+    // silently to direct connections so rsync transfers are never blocked by multiplexing.
+    match ssh_control_socket_path(host, ssh_port) {
+        Ok(socket_path) => {
+            // Escape the socket path in case it contains spaces.
+            let sock = escape(std::borrow::Cow::Borrowed(socket_path.as_str())).into_owned();
+            format!(
+                "{base} -o ControlMaster=auto -o ControlPath={sock} -o ControlPersist=60"
+            )
+        }
+        Err(e) => {
+            eprintln!(
+                "[backr] warn: ControlMaster unavailable for rsync to {host}:{ssh_port} — {e}; \
+                 falling back to direct SSH connections"
+            );
+            base
+        }
+    }
+}
+
+/// Returns the ControlMaster Unix socket path for a given host and port.
+///
+/// The socket filename is `backr-<host>-<port>.sock` under the control directory returned
+/// by [`ssh_control_dir`]. Long hostnames are truncated so that the full path stays below
+/// the 104-character Unix socket path limit imposed by macOS (Linux allows ~108).
+///
+/// # Inputs
+///
+/// * `host` — SSH target hostname or IP address.
+/// * `ssh_port` — SSH server port number.
+///
+/// # Returns
+///
+/// `Ok(String)` — absolute socket path usable in `ControlPath=…`.
+/// `Err(BackrError)` — if the control directory cannot be created (see [`ssh_control_dir`]).
+fn ssh_control_socket_path(host: &str, ssh_port: u16) -> Result<String, BackrError> {
+    let dir = ssh_control_dir()?;
+    // Suffix: `-<port>.sock` plus the `backr-` prefix + `/` separator = ~20 chars overhead.
+    // Reserve up to 80 chars for the directory component; the rest goes to the filename.
+    let dir_str = dir.to_string_lossy().into_owned();
+    // Conservatively allow the filename up to 80 chars total.
+    let suffix = format!("-{ssh_port}.sock");
+    // Available chars for the host segment = 80 - len("backr-") - len(suffix).
+    let max_host_len = 80usize
+        .saturating_sub("backr-".len())
+        .saturating_sub(suffix.len());
+    // Sanitize host: replace characters unsafe in filenames with underscores.
+    let safe_host: String = host
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect();
+    let truncated_host = if safe_host.len() > max_host_len {
+        &safe_host[..max_host_len]
+    } else {
+        &safe_host
+    };
+    Ok(format!("{dir_str}/backr-{truncated_host}{suffix}"))
+}
+
+/// Builds the base `ssh` command for a known target host, including ControlMaster options.
+///
+/// Adds `ControlMaster=auto`, `ControlPath`, and `ControlPersist=60` so that multiple
+/// `ssh`/`rsync` calls for the same host within a backup burst share one master TCP connection
+/// instead of each performing an independent handshake. If the control socket directory is
+/// unavailable (e.g. unwritable file system), the ControlMaster options are silently omitted
+/// so that backups continue over direct connections — multiplexing is a performance
+/// optimisation, not a correctness requirement.
+///
+/// # Inputs
+///
+/// * `ssh_key` — expanded local path to the private key.
+/// * `known_hosts` — Backr-isolated `known_hosts` file path.
+/// * `accept_new` — when `true`, sets `StrictHostKeyChecking=accept-new` (backup runs).
+/// * `ssh_port` — target TCP port; used both as the `-p` flag and in the ControlPath filename.
+/// * `host` — remote hostname or IP; used to derive the per-host control socket filename.
+///
+/// # Returns
+///
+/// A configured `tokio::process::Command` with ControlMaster options when the control
+/// directory is accessible; falls back to a plain SSH command if not.
+fn ssh_base_command_for_host(
+    ssh_key: &str,
+    known_hosts: &Path,
+    accept_new: bool,
+    ssh_port: u16,
+    host: &str,
+) -> Command {
     let mut c = Command::new("ssh");
     c.arg("-p").arg(ssh_port.to_string());
     c.arg("-i").arg(ssh_key);
@@ -376,6 +498,23 @@ fn ssh_base_command(ssh_key: &str, known_hosts: &Path, accept_new: bool, ssh_por
     }
     c.arg("-o")
         .arg(format!("UserKnownHostsFile={}", known_hosts.display()));
+
+    // Attempt to add ControlMaster options; silently skip if the socket dir is unavailable.
+    match ssh_control_socket_path(host, ssh_port) {
+        Ok(socket_path) => {
+            c.arg("-o").arg("ControlMaster=auto");
+            c.arg("-o").arg(format!("ControlPath={socket_path}"));
+            c.arg("-o").arg("ControlPersist=60");
+        }
+        Err(e) => {
+            // Degraded mode: log a warning but do not abort. The backup will work via a
+            // direct connection; it just won't benefit from connection reuse.
+            eprintln!(
+                "[backr] warn: ControlMaster unavailable for {host}:{ssh_port} — {e}; \
+                 falling back to direct SSH connections"
+            );
+        }
+    }
     c
 }
 
@@ -395,6 +534,8 @@ async fn run_and_capture_stdout_exact(cmd: Command) -> Result<Vec<u8>, BackrErro
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// Ensures canonical snapshot basename detection matches dashboard regex expectations.
@@ -421,5 +562,85 @@ mod tests {
             remote_project_dir("/srv/backups", "my-app"),
             "/srv/backups/my-app"
         );
+    }
+
+    // ---- ControlMaster option tests ---------------------------------------------------
+
+    /// Verifies that the SSH command string produced by `ssh_base_command_for_host` contains
+    /// the `ControlMaster=auto` and `ControlPersist=60` options required for multiplexing.
+    #[test]
+    fn ssh_command_contains_controlmaster_options() {
+        let known = PathBuf::from("/tmp/fake_known_hosts");
+        let mut cmd = ssh_base_command_for_host("/tmp/id_ed25519", &known, true, 22, "backup.example.com");
+        // `as_std` exposes the underlying std Command so we can inspect its args.
+        let args: Vec<_> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args_flat = args.join(" ");
+        assert!(
+            args_flat.contains("ControlMaster=auto"),
+            "expected ControlMaster=auto in: {args_flat}"
+        );
+        assert!(
+            args_flat.contains("ControlPersist=60"),
+            "expected ControlPersist=60 in: {args_flat}"
+        );
+        // ControlPath must be present (path content varies by environment).
+        assert!(
+            args_flat.contains("ControlPath="),
+            "expected ControlPath= in: {args_flat}"
+        );
+    }
+
+    /// Verifies that different host:port combinations produce different ControlPath socket paths.
+    #[test]
+    fn control_path_unique_per_host_port() {
+        let path_a = ssh_control_socket_path("host-a.example.com", 22)
+            .expect("control socket path for host-a");
+        let path_b = ssh_control_socket_path("host-b.example.com", 22)
+            .expect("control socket path for host-b");
+        let path_c = ssh_control_socket_path("host-a.example.com", 2222)
+            .expect("control socket path for host-a port 2222");
+        assert_ne!(path_a, path_b, "different hosts must produce different socket paths");
+        assert_ne!(path_a, path_c, "same host but different ports must produce different socket paths");
+    }
+
+    /// Verifies that `ssh_control_socket_path` is deterministic: the same host+port always
+    /// yields the same socket path so rsync and ssh commands can share a master connection.
+    #[test]
+    fn control_path_deterministic_for_same_host_port() {
+        let first = ssh_control_socket_path("myhost.local", 22)
+            .expect("first control socket path");
+        let second = ssh_control_socket_path("myhost.local", 22)
+            .expect("second control socket path");
+        assert_eq!(first, second, "control socket path must be deterministic");
+    }
+
+    /// Verifies that `ssh_rsh_string` includes ControlMaster options for backup (accept_new=true)
+    /// and restore (accept_new=false) rsync calls.
+    #[test]
+    fn ssh_rsh_string_contains_controlmaster_options() {
+        let known = PathBuf::from("/tmp/fake_known_hosts");
+        // Backup variant.
+        let backup_rsh = ssh_rsh_string("/tmp/id_ed25519", &known, 22, "backup.example.com", true);
+        assert!(
+            backup_rsh.contains("ControlMaster=auto"),
+            "backup rsh must contain ControlMaster=auto: {backup_rsh}"
+        );
+        assert!(
+            backup_rsh.contains("ControlPersist=60"),
+            "backup rsh must contain ControlPersist=60: {backup_rsh}"
+        );
+        // Restore variant.
+        let restore_rsh = ssh_rsh_string("/tmp/id_ed25519", &known, 22, "backup.example.com", false);
+        assert!(
+            restore_rsh.contains("ControlMaster=auto"),
+            "restore rsh must contain ControlMaster=auto: {restore_rsh}"
+        );
+        assert!(
+            restore_rsh.contains("ControlPersist=60"),
+            "restore rsh must contain ControlPersist=60: {restore_rsh}"
+        );
+        // Backup must use accept-new; restore must not.
+        assert!(backup_rsh.contains("accept-new"), "backup rsh must use StrictHostKeyChecking=accept-new");
+        assert!(!restore_rsh.contains("accept-new"), "restore rsh must not use StrictHostKeyChecking=accept-new");
     }
 }

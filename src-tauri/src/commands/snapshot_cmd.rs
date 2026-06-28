@@ -121,6 +121,7 @@ async fn restore_single_snapshot_to_home(
         &cfg.remote.ssh_key,
         known_hosts,
         &remote_url,
+        &cfg.remote.host,
         cfg.remote.port,
         &destination,
     )
