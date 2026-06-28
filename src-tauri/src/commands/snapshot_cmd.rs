@@ -11,6 +11,7 @@ use tauri::{AppHandle, State};
 
 use crate::backup::rsync;
 use crate::backup::ssh::{self, is_valid_snapshot_name};
+use crate::backup::validate::{validate_relative_path, validate_remote_component};
 use crate::config::{self};
 use crate::error::BackrError;
 use crate::progress_sink::{AppEmitProgress, SharedProgress};
@@ -196,6 +197,9 @@ pub async fn list_snapshots(
     state: State<'_, Arc<AppState>>,
     project: String,
 ) -> Result<Vec<SnapshotEntry>, String> {
+    // Validate `project` before any config load or SSH call — rejects traversal attempts.
+    validate_remote_component(&project).map_err(|e| format!("invalid project: {e}"))?;
+
     let cfg = state
         .config
         .lock()
@@ -237,6 +241,14 @@ pub async fn list_files(
     snapshot: String,
     path: String,
 ) -> Result<Vec<FileEntry>, String> {
+    // Validate all user-supplied identifiers before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| format!("invalid project: {e}"))?;
+    validate_remote_component(&snapshot).map_err(|e| format!("invalid snapshot: {e}"))?;
+    // The path argument may be empty (means snapshot root) or a relative subpath.
+    if !path.is_empty() && path != "." {
+        validate_relative_path(path.trim().trim_start_matches('/')).map_err(|e| format!("invalid path: {e}"))?;
+    }
+
     let cfg = state
         .config
         .lock()
@@ -293,6 +305,12 @@ pub async fn read_snapshot_file(
     snapshot: String,
     relative_path: String,
 ) -> Result<SnapshotFileContents, String> {
+    // Validate all user-supplied identifiers before any config load or SSH call.
+    // `validate_remote_component` covers the `project` argument; the stricter
+    // `is_valid_snapshot_name` timestamp check is kept for `snapshot` as an extra
+    // semantic guard on top of the traversal check.
+    validate_remote_component(&project).map_err(|e| format!("invalid project: {e}"))?;
+    validate_remote_component(&snapshot).map_err(|e| format!("invalid snapshot: {e}"))?;
     if !is_valid_snapshot_name(&snapshot) {
         return Err("invalid snapshot folder name".into());
     }
@@ -303,10 +321,11 @@ pub async fn read_snapshot_file(
         .clone()
         .ok_or_else(|| "not configured".to_string())?;
     let known = config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+    // Strip a leading '/' so callers may pass either form; then validate the
+    // normalised path.  `validate_relative_path` supersedes the previous manual
+    // `..` guard — it covers both `..` alone and embedded `..` segments.
     let normalized = relative_path.trim().trim_start_matches('/').to_string();
-    if normalized.contains("..") {
-        return Err("invalid path".into());
-    }
+    validate_relative_path(&normalized).map_err(|e| format!("invalid path: {e}"))?;
 
     let bytes = ssh::remote_read_file_bytes(
         &cfg.remote.ssh_key,
@@ -344,6 +363,10 @@ pub async fn restore_snapshot(
     project: String,
     snapshot: String,
 ) -> Result<String, String> {
+    // Validate both identifiers before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| format!("invalid project: {e}"))?;
+    validate_remote_component(&snapshot).map_err(|e| format!("invalid snapshot: {e}"))?;
+
     let cfg = state
         .config
         .lock()
@@ -368,6 +391,9 @@ pub async fn restore_all_snapshots(
     state: State<'_, Arc<AppState>>,
     project: String,
 ) -> Result<Vec<String>, String> {
+    // Validate `project` before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| format!("invalid project: {e}"))?;
+
     let cfg = state
         .config
         .lock()
