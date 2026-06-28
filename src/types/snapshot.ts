@@ -6,8 +6,6 @@
 /** Remote snapshot directory metadata. */
 export type SnapshotEntry = {
   name: string;
-  modified_unix: number | null;
-  size_bytes: number | null;
 };
 
 /** One child returned by `list_files`. */

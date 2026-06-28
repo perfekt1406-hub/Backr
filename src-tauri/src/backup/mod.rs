@@ -6,3 +6,4 @@
 pub mod excludes;
 pub mod rsync;
 pub mod ssh;
+pub mod validate;

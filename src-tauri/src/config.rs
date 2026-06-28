@@ -125,6 +125,34 @@ pub fn save_config(config: &Config) -> Result<(), BackrError> {
     Ok(())
 }
 
+/// Returns the path to the SSH control socket directory for ControlMaster multiplexing.
+///
+/// Uses `XDG_RUNTIME_DIR` if set (guaranteed writable, tmpfs-backed on most Linux systems);
+/// otherwise falls back to `~/.config/backr/ssh-control`. Creates the directory if it does
+/// not yet exist.
+///
+/// The socket filename for a given host+port should be formed by the caller as:
+/// `<returned_dir>/backr-<host>-<port>.sock`
+///
+/// # Returns
+///
+/// `Ok(PathBuf)` — absolute path to the existing directory on success.
+/// `Err(BackrError)` — if neither `XDG_RUNTIME_DIR` nor the home directory can be resolved,
+/// or if `create_dir_all` fails.
+pub fn ssh_control_dir() -> Result<PathBuf, BackrError> {
+    // Prefer XDG_RUNTIME_DIR (tmpfs-backed, cleaned on logout, world-standard on Linux/systemd).
+    let dir = if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(runtime).join("backr-ssh-control")
+    } else {
+        // Fall back to the Backr config directory so we always have a stable location.
+        let base = dirs::config_dir()
+            .ok_or_else(|| BackrError::Config("could not resolve user config directory".into()))?;
+        base.join("backr").join("ssh-control")
+    };
+    std::fs::create_dir_all(&dir).map_err(BackrError::Io)?;
+    Ok(dir)
+}
+
 /// Ensures a directory exists locally, creating parents as required.
 ///
 /// # Inputs
@@ -135,4 +163,41 @@ pub fn ensure_dir_exists(dir: &Path) -> Result<(), BackrError> {
         std::fs::create_dir_all(dir).map_err(BackrError::Io)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies that `ssh_control_dir` returns a path anchored under either `XDG_RUNTIME_DIR`
+    /// or the user home directory, depending on the environment.
+    #[test]
+    fn ssh_control_dir_returns_valid_path() {
+        let dir = ssh_control_dir().expect("ssh_control_dir should succeed");
+        // Must be absolute so the SSH `-o ControlPath=` option resolves correctly.
+        assert!(dir.is_absolute(), "control dir must be absolute: {dir:?}");
+        // The directory must exist after the call.
+        assert!(dir.exists(), "control dir must exist after creation: {dir:?}");
+
+        // Path must be rooted under XDG_RUNTIME_DIR or the user home/config dir.
+        let under_xdg = std::env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .map(|r| dir.starts_with(r))
+            .unwrap_or(false);
+        let under_home = dirs::home_dir()
+            .map(|h| dir.starts_with(h))
+            .unwrap_or(false);
+        assert!(
+            under_xdg || under_home,
+            "control dir {dir:?} must be under XDG_RUNTIME_DIR or home"
+        );
+    }
+
+    /// Verifies that calling `ssh_control_dir` twice returns the same path (deterministic).
+    #[test]
+    fn ssh_control_dir_is_deterministic() {
+        let first = ssh_control_dir().expect("first call should succeed");
+        let second = ssh_control_dir().expect("second call should succeed");
+        assert_eq!(first, second, "ssh_control_dir must return the same path on repeated calls");
+    }
 }

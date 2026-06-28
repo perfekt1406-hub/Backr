@@ -7,7 +7,7 @@ import { writable, type Writable } from "svelte/store";
 
 import * as commands from "../lib/commands";
 import type { ProjectInfo } from "../types/project";
-import { showToast } from "./ui";
+import { handleCommandError } from "./ui";
 
 /** Cached sort order follows backend lexicographic ordering. */
 export const projects: Writable<ProjectInfo[]> = writable([]);
@@ -22,7 +22,7 @@ export async function refreshProjects(): Promise<void> {
     const rows = await commands.listProjects(false);
     projects.set(rows);
   } catch (err) {
-    showToast(String(err));
+    handleCommandError(err);
   }
 }
 
@@ -36,6 +36,6 @@ export async function refreshProjectsRemote(): Promise<void> {
     const rows = await commands.listProjects(true);
     projects.set(rows);
   } catch (err) {
-    showToast(String(err));
+    handleCommandError(err);
   }
 }

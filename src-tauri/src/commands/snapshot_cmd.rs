@@ -1,5 +1,8 @@
 /*
  * Snapshot browsing and restore commands backed by remote `find` helpers.
+ *
+ * All commands return `Result<T, BackrCommandError>` so the frontend receives a typed
+ * `{ kind, message }` error object rather than a bare string.
  */
 
 use std::path::{Path, PathBuf};
@@ -11,8 +14,9 @@ use tauri::{AppHandle, State};
 
 use crate::backup::rsync;
 use crate::backup::ssh::{self, is_valid_snapshot_name};
+use crate::backup::validate::{validate_relative_path, validate_remote_component};
 use crate::config::{self};
-use crate::error::BackrError;
+use crate::error::{BackrCommandError, BackrError};
 use crate::progress_sink::{AppEmitProgress, SharedProgress};
 use crate::state::AppState;
 
@@ -21,10 +25,6 @@ use crate::state::AppState;
 pub struct SnapshotEntry {
     /// Remote directory name (timestamp string).
     pub name: String,
-    /// Best-effort directory mtime in seconds since UNIX epoch (if discoverable).
-    pub modified_unix: Option<f64>,
-    /// Total size in bytes (not computed here; reserved for future `du` integration).
-    pub size_bytes: Option<u64>,
 }
 
 /// One row in the lazy file tree (`list_files` payload).
@@ -94,6 +94,18 @@ fn restore_destination_folder_base(snapshot: &str) -> String {
 }
 
 /// Runs one rsync restore for `snapshot`; shared by single-restore and bulk-restore commands.
+///
+/// # Inputs
+///
+/// * `app`         — Tauri app handle for emitting rsync progress events.
+/// * `cfg`         — loaded configuration (SSH key, host, user, port, backup path).
+/// * `known_hosts` — path to the isolated SSH known_hosts file.
+/// * `project`     — project directory name under the backup root.
+/// * `snapshot`    — snapshot directory name (validated timestamp format).
+///
+/// # Returns
+///
+/// Absolute local destination path where files were restored.
 async fn restore_single_snapshot_to_home(
     app: &AppHandle,
     cfg: &config::Config,
@@ -116,11 +128,13 @@ async fn restore_single_snapshot_to_home(
     std::fs::create_dir_all(&destination).map_err(BackrError::Io)?;
 
     let sink: SharedProgress = Arc::new(AppEmitProgress::new(app.clone()));
+    /* rsync::rsync_restore_snapshot runs an rsync pull from remote snapshot to local destination. */
     rsync::rsync_restore_snapshot(
         sink,
         &cfg.remote.ssh_key,
         known_hosts,
         &remote_url,
+        &cfg.remote.host,
         cfg.remote.port,
         &destination,
     )
@@ -164,6 +178,7 @@ async fn restore_every_valid_snapshot_for_project(
     known_hosts: &Path,
     project: &str,
 ) -> Result<Vec<String>, BackrError> {
+    /* ssh::remote_list_snapshot_names lists all snapshot directory names via SSH for the project. */
     let names = ssh::remote_list_snapshot_names(
         &cfg.remote.ssh_key,
         known_hosts,
@@ -195,14 +210,17 @@ async fn restore_every_valid_snapshot_for_project(
 pub async fn list_snapshots(
     state: State<'_, Arc<AppState>>,
     project: String,
-) -> Result<Vec<SnapshotEntry>, String> {
-    let cfg = state
-        .config
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "not configured".to_string())?;
-    let known = config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+) -> Result<Vec<SnapshotEntry>, BackrCommandError> {
+    // Validate `project` before any config load or SSH call — rejects traversal attempts.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+
+    /* AppState::require_config returns the cloned Config or a NotConfigured error. */
+    let cfg = state.require_config().await?;
+
+    /* config::known_hosts_path resolves the isolated SSH known_hosts file path. */
+    let known = config::known_hosts_path().map_err(BackrCommandError::from)?;
+
+    /* ssh::remote_list_snapshot_names lists snapshot directories on the remote host via SSH. */
     let names = ssh::remote_list_snapshot_names(
         &cfg.remote.ssh_key,
         &known,
@@ -213,18 +231,14 @@ pub async fn list_snapshots(
         &project,
     )
     .await
-    .map_err(|e: BackrError| e.to_string())?;
+    .map_err(BackrCommandError::from)?;
 
     let mut out = Vec::new();
     for name in names {
         if !is_valid_snapshot_name(&name) {
             continue;
         }
-        out.push(SnapshotEntry {
-            name,
-            modified_unix: None,
-            size_bytes: None,
-        });
+        out.push(SnapshotEntry { name });
     }
     Ok(out)
 }
@@ -236,20 +250,30 @@ pub async fn list_files(
     project: String,
     snapshot: String,
     path: String,
-) -> Result<Vec<FileEntry>, String> {
-    let cfg = state
-        .config
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "not configured".to_string())?;
-    let known = config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+) -> Result<Vec<FileEntry>, BackrCommandError> {
+    // Validate all user-supplied identifiers before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+    validate_remote_component(&snapshot).map_err(|e| BackrCommandError::invalid_input(e))?;
+    // The path argument may be empty (means snapshot root) or a relative subpath.
+    if !path.is_empty() && path != "." {
+        validate_relative_path(path.trim().trim_start_matches('/'))
+            .map_err(|e| BackrCommandError::invalid_input(e))?;
+    }
+
+    /* AppState::require_config returns the cloned Config or a NotConfigured error. */
+    let cfg = state.require_config().await?;
+
+    /* config::known_hosts_path resolves the isolated SSH known_hosts file path. */
+    let known = config::known_hosts_path().map_err(BackrCommandError::from)?;
+
+
     let normalized = if path.is_empty() || path == "." {
         String::new()
     } else {
         path.trim().trim_start_matches('/').to_string()
     };
 
+    /* ssh::remote_list_children runs a remote `find -maxdepth 1` inside the snapshot directory. */
     let rows = ssh::remote_list_children(
         &cfg.remote.ssh_key,
         &known,
@@ -262,7 +286,7 @@ pub async fn list_files(
         &normalized,
     )
     .await
-    .map_err(|e: BackrError| e.to_string())?;
+    .map_err(BackrCommandError::from)?;
 
     let mut out = Vec::new();
     for row in rows {
@@ -292,22 +316,29 @@ pub async fn read_snapshot_file(
     project: String,
     snapshot: String,
     relative_path: String,
-) -> Result<SnapshotFileContents, String> {
+) -> Result<SnapshotFileContents, BackrCommandError> {
+    // Validate all user-supplied identifiers before any config load or SSH call.
+    // `validate_remote_component` covers the project/snapshot traversal check;
+    // `is_valid_snapshot_name` adds the timestamp-format semantic guard on snapshot.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+    validate_remote_component(&snapshot).map_err(|e| BackrCommandError::invalid_input(e))?;
     if !is_valid_snapshot_name(&snapshot) {
-        return Err("invalid snapshot folder name".into());
-    }
-    let cfg = state
-        .config
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "not configured".to_string())?;
-    let known = config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
-    let normalized = relative_path.trim().trim_start_matches('/').to_string();
-    if normalized.contains("..") {
-        return Err("invalid path".into());
+        return Err(BackrCommandError::invalid_input("invalid snapshot folder name"));
     }
 
+    // Strip a leading '/' so callers may pass either form; then validate the
+    // normalized path. `validate_relative_path` covers both `..` alone and embedded
+    // `..` segments, superseding the previous manual `..` guard.
+    let normalized = relative_path.trim().trim_start_matches('/').to_string();
+    validate_relative_path(&normalized).map_err(|e| BackrCommandError::invalid_input(e))?;
+
+    /* AppState::require_config returns the cloned Config or a NotConfigured error. */
+    let cfg = state.require_config().await?;
+
+    /* config::known_hosts_path resolves the isolated SSH known_hosts file path. */
+    let known = config::known_hosts_path().map_err(BackrCommandError::from)?;
+
+    /* ssh::remote_read_file_bytes fetches up to `max_bytes` from a remote file via SSH. */
     let bytes = ssh::remote_read_file_bytes(
         &cfg.remote.ssh_key,
         &known,
@@ -321,11 +352,13 @@ pub async fn read_snapshot_file(
         SNAPSHOT_READ_MAX_BYTES,
     )
     .await
-    .map_err(|e: BackrError| e.to_string())?;
+    .map_err(BackrCommandError::from)?;
 
     let truncated = bytes.len() as u64 >= SNAPSHOT_READ_MAX_BYTES;
     let text = String::from_utf8(bytes).map_err(|_| {
-        "file is not valid UTF-8 (binary files cannot be previewed)".to_string()
+        BackrCommandError::invalid_input(
+            "file is not valid UTF-8 (binary files cannot be previewed)",
+        )
     })?;
 
     Ok(SnapshotFileContents { text, truncated })
@@ -343,18 +376,21 @@ pub async fn restore_snapshot(
     state: State<'_, Arc<AppState>>,
     project: String,
     snapshot: String,
-) -> Result<String, String> {
-    let cfg = state
-        .config
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "not configured".to_string())?;
-    let known = config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+) -> Result<String, BackrCommandError> {
+    // Validate both identifiers before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
+    validate_remote_component(&snapshot).map_err(|e| BackrCommandError::invalid_input(e))?;
 
+    /* AppState::require_config returns the cloned Config or a NotConfigured error. */
+    let cfg = state.require_config().await?;
+
+    /* config::known_hosts_path resolves the isolated SSH known_hosts file path. */
+    let known = config::known_hosts_path().map_err(BackrCommandError::from)?;
+
+    /* restore_single_snapshot_to_home runs rsync to restore one snapshot locally. */
     restore_single_snapshot_to_home(&app, &cfg, &known, &project, &snapshot)
         .await
-        .map_err(|e: BackrError| e.to_string())
+        .map_err(BackrCommandError::from)
 }
 
 /// Restores every indexed snapshot for `project` sequentially (newest remote listing order).
@@ -367,18 +403,20 @@ pub async fn restore_all_snapshots(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     project: String,
-) -> Result<Vec<String>, String> {
-    let cfg = state
-        .config
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "not configured".to_string())?;
-    let known = config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+) -> Result<Vec<String>, BackrCommandError> {
+    // Validate `project` before any config load or SSH call.
+    validate_remote_component(&project).map_err(|e| BackrCommandError::invalid_input(e))?;
 
+    /* AppState::require_config returns the cloned Config or a NotConfigured error. */
+    let cfg = state.require_config().await?;
+
+    /* config::known_hosts_path resolves the isolated SSH known_hosts file path. */
+    let known = config::known_hosts_path().map_err(BackrCommandError::from)?;
+
+    /* restore_every_valid_snapshot_for_project iterates all valid snapshots and restores each. */
     restore_every_valid_snapshot_for_project(&app, &cfg, &known, &project)
         .await
-        .map_err(|e: BackrError| e.to_string())
+        .map_err(BackrCommandError::from)
 }
 
 /// Restores all valid snapshots for every immediate child project directory (lexicographic order).
@@ -392,23 +430,25 @@ pub async fn restore_all_snapshots(
 pub async fn restore_all_projects(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<RestoreEveryProjectRow>, String> {
-    let cfg = state
-        .config
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "not configured".to_string())?;
-    let known = config::known_hosts_path().map_err(|e: BackrError| e.to_string())?;
+) -> Result<Vec<RestoreEveryProjectRow>, BackrCommandError> {
+    /* AppState::require_config returns the cloned Config or a NotConfigured error. */
+    let cfg = state.require_config().await?;
+
+    /* config::known_hosts_path resolves the isolated SSH known_hosts file path. */
+    let known = config::known_hosts_path().map_err(BackrCommandError::from)?;
+
     let base = Path::new(&cfg.local.projects_path);
-    let projects = local_child_directory_names(base).map_err(|e: BackrError| e.to_string())?;
+
+    /* local_child_directory_names enumerates subdirectories of the local projects root. */
+    let projects = local_child_directory_names(base).map_err(BackrCommandError::from)?;
 
     let mut rows = Vec::new();
     for project in projects {
+        /* restore_every_valid_snapshot_for_project restores all snapshots for a single project. */
         let destinations =
             restore_every_valid_snapshot_for_project(&app, &cfg, &known, &project)
                 .await
-                .map_err(|e: BackrError| e.to_string())?;
+                .map_err(BackrCommandError::from)?;
         if !destinations.is_empty() {
             rows.push(RestoreEveryProjectRow {
                 project,

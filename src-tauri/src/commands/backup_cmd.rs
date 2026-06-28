@@ -1,6 +1,11 @@
 /*
  * Backup command surface: on-demand runs, scheduler hook points, and rsync orchestration.
  * Uses an `AtomicBool` compare-exchange guard to prevent overlapping backup jobs.
+ *
+ * Internal helpers (`execute_backup_cycle_with_sink`, `execute_backup_cycle`) continue to use
+ * `BackrError` because they are not Tauri commands.  Only `run_backup` (the Tauri command) and
+ * `spawn_backup_job` (its sync wrapper) return `BackrCommandError` / typed errors at the IPC
+ * boundary.
  */
 
 use std::path::Path;
@@ -12,8 +17,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::backup::rsync::{self, remote_snapshot_dest_folder};
 use crate::backup::ssh;
+use crate::backup::validate::validate_remote_component;
 use crate::config::{self, Config};
-use crate::error::BackrError;
+use crate::error::{BackrCommandError, BackrError};
 use crate::progress_sink::{AppEmitProgress, SharedProgress};
 use crate::state::AppState;
 
@@ -29,6 +35,12 @@ impl Drop for InProgressDrop {
 }
 
 /// Visible to VM/integration tests via a custom [`SharedProgress`] sink; skips tray refreshes.
+///
+/// # Inputs
+///
+/// * `sink`    — progress event receiver (emits rsync lines).
+/// * `state`   — shared application state (config, in-progress flag, active project).
+/// * `project` — optional directory name restricting the backup to a single project.
 pub async fn execute_backup_cycle_with_sink(
     sink: SharedProgress,
     state: &Arc<AppState>,
@@ -40,6 +52,7 @@ pub async fn execute_backup_cycle_with_sink(
             .ok_or_else(|| BackrError::Config("application is not configured".into()))?
     };
 
+    /* config::known_hosts_path resolves the isolated SSH known_hosts file used for all SSH calls. */
     let known_hosts = config::known_hosts_path()?;
     let projects = resolve_targets(&cfg, project.as_deref())?;
     if projects.is_empty() {
@@ -61,6 +74,7 @@ pub async fn execute_backup_cycle_with_sink(
             )));
         }
 
+        /* ssh::remote_list_snapshot_names lists existing snapshots to compute the rsync link-dest. */
         let snapshots = ssh::remote_list_snapshot_names(
             &cfg.remote.ssh_key,
             &known_hosts,
@@ -74,6 +88,7 @@ pub async fn execute_backup_cycle_with_sink(
         .unwrap_or_default();
 
         let project_remote = ssh::remote_project_dir(&cfg.remote.backup_path, &project_name);
+        /* ssh::ensure_remote_dir_exists creates the remote project directory if absent. */
         ssh::ensure_remote_dir_exists(
             &cfg.remote.ssh_key,
             &known_hosts,
@@ -101,6 +116,7 @@ pub async fn execute_backup_cycle_with_sink(
             cfg.remote.user, cfg.remote.host, dest_folder
         ));
 
+        /* rsync::rsync_backup_snapshot runs rsync with `--link-dest` incremental snapshot semantics. */
         rsync::rsync_backup_snapshot(
             sink.clone(),
             &cfg.remote.ssh_key,
@@ -115,6 +131,7 @@ pub async fn execute_backup_cycle_with_sink(
         .await?;
 
         let snapshot_count_after = snapshots.len() + 1;
+        /* project_snapshot_cache::record_backup_success persists snapshot metadata to disk cache. */
         crate::project_snapshot_cache::record_backup_success(
             &cfg,
             &project_name,
@@ -131,6 +148,7 @@ pub async fn execute_backup_cycle_with_sink(
 
     let mut updated = cfg.clone();
     updated.state.last_backup_at = Some(now);
+    /* config::save_config atomically writes the updated config to disk. */
     config::save_config(&updated)?;
 
     {
@@ -146,8 +164,8 @@ pub async fn execute_backup_cycle_with_sink(
 ///
 /// # Inputs
 ///
-/// * `app` — global handle for emitting `backup://progress` lines.
-/// * `state` — shared mutable configuration and progress flags.
+/// * `app`     — global handle for emitting `backup://progress` lines.
+/// * `state`   — shared mutable configuration and progress flags.
 /// * `project` — optional limiting project directory name.
 ///
 /// # Returns
@@ -160,6 +178,7 @@ pub async fn execute_backup_cycle(
 ) -> Result<(), BackrError> {
     let sink: SharedProgress = Arc::new(AppEmitProgress::new(app.clone()));
     execute_backup_cycle_with_sink(sink, state, project).await?;
+    /* tray::update_tooltip refreshes the system-tray tooltip with the latest backup time. */
     let _ = crate::tray::update_tooltip(app, state).await;
     Ok(())
 }
@@ -168,22 +187,24 @@ pub async fn execute_backup_cycle(
 ///
 /// # Inputs
 ///
+/// * `app`     — Tauri app handle used for progress event emission and tray updates.
+/// * `state`   — shared application state; must have `in_progress == false` to proceed.
 /// * `project` — optional directory name restricting the sync to a single project.
 ///
 /// # Returns
 ///
-/// `Ok(())` when the worker was scheduled; `Err` when another backup is active.
+/// `Ok(())` when the worker was scheduled; `Err(BackrCommandError)` when another backup is active.
 pub fn spawn_backup_job(
     app: &AppHandle,
     state: &Arc<AppState>,
     project: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), BackrCommandError> {
     if state
         .in_progress
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return Err("a backup is already in progress".into());
+        return Err(BackrCommandError::backup_in_progress());
     }
 
     let app = app.clone();
@@ -212,12 +233,20 @@ pub fn spawn_backup_job(
 }
 
 /// Tauri command entrypoint delegating to [`spawn_backup_job`].
+///
+/// # Inputs
+///
+/// * `project` — optional project directory name to back up (all projects when omitted).
 #[tauri::command]
 pub async fn run_backup(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     project: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), BackrCommandError> {
+    // Validate the optional project name before dispatching — rejects traversal attempts.
+    if let Some(ref p) = project {
+        validate_remote_component(p).map_err(|e| BackrCommandError::invalid_input(e))?;
+    }
     spawn_backup_job(&app, state.inner(), project)
 }
 
@@ -265,6 +294,7 @@ pub async fn run_scheduled_backup(app: AppHandle) -> Result<(), String> {
 ///
 /// # Inputs
 ///
+/// * `cfg`  — loaded configuration providing `local.projects_path`.
 /// * `only` — optional folder name under `local.projects_path`.
 ///
 /// # Returns

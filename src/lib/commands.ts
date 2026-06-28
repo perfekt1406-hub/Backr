@@ -15,7 +15,7 @@ import type {
   HostVolumeSummary,
 } from "../types/hostDashboard";
 import type { AuthorizedPubkeyEntry, HostRemovePubkeyResult, HostTrustAppendResult, HostTrustStatus } from "../types/hostTrust";
-import type { DiscoveredHost, PairingStarted } from "../types/pairing";
+import type { DiscoveredHost, PairDraft, PairingStarted } from "../types/pairing";
 import type { ShellBootstrap } from "../types/shellBootstrap";
 import type { SystemInfo } from "../types/systemInfo";
 import * as devMockBackend from "./devMock/backend";
@@ -381,14 +381,33 @@ export async function discoverHosts(): Promise<DiscoveredHost[]> {
 }
 
 /**
- * Client: pairs with a discovered host using the 6-digit code; returns a prefilled
- * config draft for the setup wizard.
+ * Client: pairs with a discovered host using the 6-digit code; returns a `PairDraft`
+ * containing the prefilled config AND the host's SSH key fingerprint for out-of-band
+ * verification. Call `confirmPairing` after the user confirms the fingerprint.
  *
  * External: `invoke` → `pair_with_host`.
  */
-export async function pairWithHost(address: string, code: string): Promise<Config> {
+export async function pairWithHost(address: string, code: string): Promise<PairDraft> {
   if (useDevMock()) {
     return devMockBackend.mockPairWithHost(address, code);
   }
-  return invoke<Config>("pair_with_host", { address, code });
+  return invoke<PairDraft>("pair_with_host", { address, code });
+}
+
+/**
+ * Client: finalizes a confirmed pair by pinning the host key and returning the
+ * ready-to-save config. Call this only after the user has verified the fingerprint
+ * shown in the UI matches what is displayed on the host screen.
+ *
+ * # Inputs
+ *
+ * * `draft` — the `PairDraft` returned by `pairWithHost`.
+ *
+ * External: `invoke` → `confirm_pairing`.
+ */
+export async function confirmPairing(draft: PairDraft): Promise<Config> {
+  if (useDevMock()) {
+    return devMockBackend.mockConfirmPairing(draft);
+  }
+  return invoke<Config>("confirm_pairing", { draft });
 }
