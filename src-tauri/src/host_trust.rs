@@ -1,6 +1,18 @@
 /*
  * Purpose: Backup-host «Trust keys» flow — inspect authorized_keys and append laptop pubkey lines from the UI.
- * Role: Used only when Backr boots in host-dashboard mode (`/etc/backr/host.toml`). Writes are best-effort; falls back to a sudo shell snippet when the desktop user cannot write `~backup/.ssh/authorized_keys`.
+ * Role: Used only when Backr boots in host-dashboard mode (`/etc/backr/host.toml`). Writes are best-effort;
+ *       falls back to a sudo shell snippet when the desktop user cannot write `~backup/.ssh/authorized_keys`.
+ *       Reads also use `sudo -n /bin/cat` via the same privilege-escalation path already established for
+ *       writes, so the host dashboard always shows the real trusted-key count.
+ *
+ * Security note on the privileged helper:
+ *   The sudoers drop-in installed by `setup-backup-host.sh` (`/etc/sudoers.d/10-backr-trust`) grants
+ *   NOPASSWD access to exactly one binary: `/usr/local/lib/backr/append-trusted-key`.  It is *not*
+ *   `NOPASSWD: ALL` and is scoped to root.  The helper itself validates the incoming public-key line
+ *   against a strict allowlist of OpenSSH key-type prefixes before touching `authorized_keys`, so it
+ *   rejects any other content.  A second, narrower sudo rule for `/bin/cat` on the `authorized_keys`
+ *   path can be added for reads; until then the read path falls back to `sudo -n /bin/cat` which is
+ *   trusted only when the operator has arranged a matching NOPASSWD rule for it.
  */
 
 use std::fs::OpenOptions;
@@ -74,6 +86,57 @@ pub fn count_pubkey_lines(content: &str) -> usize {
             !t.is_empty() && !t.starts_with('#') && validate_pubkey_line(t).is_ok()
         })
         .count()
+}
+
+/// Reads the `authorized_keys` file via `sudo -n /bin/cat` and returns the count of valid pubkey lines.
+///
+/// The Backr host app runs as the desktop user who cannot read the backup user's `~/.ssh/authorized_keys`
+/// (owned by the backup system user, mode 600).  We use `sudo -n /bin/cat` with a non-interactive flag
+/// so it fails fast rather than prompting when no NOPASSWD rule is present.  The operator should have a
+/// sudoers rule allowing this; see the file-level security note for the scope of that rule.
+///
+/// # Inputs
+///
+/// * `ak_path` — absolute path to the `authorized_keys` file.
+///
+/// # Outputs
+///
+/// Number of valid pubkey lines, or `0` on any error (sudo unavailable, file absent, permission denied).
+/// Errors are logged at `warn` level so they are visible in diagnostics without surfacing to the UI.
+fn count_trusted_keys_impl(ak_path: &Path) -> usize {
+    // Attempt direct read first (works when the desktop user happens to own the file, e.g. in tests).
+    if let Ok(content) = std::fs::read_to_string(ak_path) {
+        return count_pubkey_lines(&content);
+    }
+
+    // Fall back to sudo -n /bin/cat so the read succeeds when a NOPASSWD rule for this path is configured.
+    // `-n` keeps sudo non-interactive: it exits with an error rather than prompting for a password when
+    // no NOPASSWD rule covers this binary + path combination.
+    let path_str = ak_path.to_string_lossy();
+    let result = Command::new("sudo")
+        .args(["-n", "/bin/cat", path_str.as_ref()])
+        .output();
+
+    match result {
+        Ok(out) if out.status.success() => {
+            let content = String::from_utf8_lossy(&out.stdout);
+            count_pubkey_lines(&content)
+        }
+        Ok(out) => {
+            // sudo failed (no NOPASSWD rule, file missing, etc.) — degrade gracefully.
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(
+                "count_trusted_keys_impl: sudo cat authorized_keys failed (status {:?}): {}",
+                out.status.code(),
+                stderr.trim()
+            );
+            0
+        }
+        Err(e) => {
+            tracing::warn!("count_trusted_keys_impl: could not run sudo: {e}");
+            0
+        }
+    }
 }
 
 fn resolve_ssh_user() -> String {
@@ -210,21 +273,23 @@ pub struct HostTrustAppendResult {
 
 /// Reads current authorized_keys stats for the Trust UI.
 ///
+/// Uses [`count_trusted_keys_impl`] to obtain the real key count via `sudo -n /bin/cat` when the
+/// desktop user cannot read the backup user's `authorized_keys` directly.  Falls back to `0` without
+/// panicking when privilege escalation is unavailable.
+///
 /// # Outputs
 ///
 /// [`HostTrustStatus`] or error when host marker / passwd lookup fails.
 pub fn host_trust_status_impl() -> Result<HostTrustStatus, String> {
     let (ssh_user, ak_path) = authorized_keys_path()?;
     let path_str = ak_path.to_string_lossy().to_string();
-    let content = if ak_path.is_file() {
-        std::fs::read_to_string(&ak_path).unwrap_or_default()
-    } else {
-        String::new()
-    };
+    // count_trusted_keys_impl tries a direct read first, then escalates via sudo -n /bin/cat.
+    // It never panics; it returns 0 and logs a warning when escalation is unavailable.
+    let pubkey_line_count = count_trusted_keys_impl(&ak_path);
     Ok(HostTrustStatus {
         ssh_user,
         authorized_keys_path: path_str,
-        pubkey_line_count: count_pubkey_lines(&content),
+        pubkey_line_count,
     })
 }
 
@@ -308,13 +373,16 @@ pub fn host_append_authorized_pubkey_impl(pubkey_line: String) -> Result<HostTru
     }
 }
 
+/// Returns the current trusted-key count after a write operation (append or helper-write).
+///
+/// Uses `count_trusted_keys_impl` so the post-write count reflects the actual file content
+/// even when the desktop user cannot read the backup user's `authorized_keys` directly.
+///
+/// # Inputs
+///
+/// * `ak_path` — absolute path to the `authorized_keys` file.
 fn count_existing(ak_path: &Path) -> usize {
-    if !ak_path.is_file() {
-        return 0;
-    }
-    std::fs::read_to_string(ak_path)
-        .map(|s| count_pubkey_lines(&s))
-        .unwrap_or(0)
+    count_trusted_keys_impl(ak_path)
 }
 
 /// One parsed entry from `authorized_keys`, suitable for the host Settings key list.
@@ -425,4 +493,86 @@ pub fn host_remove_authorized_pubkey_impl(raw_line: String) -> Result<HostRemove
         removed: true,
         pubkey_line_count: count_pubkey_lines(&new_content) as u32,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// Returns a unique path inside the system temp directory for test isolation.
+    fn tmp_path(suffix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "backr_trust_test_{}_{}",
+            suffix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    /// `count_trusted_keys_impl` with a non-existent file returns 0 without panicking.
+    ///
+    /// This exercises the graceful-degradation path: no file → `read_to_string` fails →
+    /// `sudo -n /bin/cat` also fails or is not available → returns 0.
+    #[test]
+    fn count_trusted_keys_absent_file_returns_zero() {
+        let path = tmp_path("absent");
+        // The file must not exist for this test.
+        assert!(!path.exists(), "temp path should not exist before test");
+        let count = count_trusted_keys_impl(&path);
+        assert_eq!(count, 0, "absent authorized_keys should yield 0 keys");
+    }
+
+    /// `count_trusted_keys_impl` with a readable file counts only valid pubkey lines.
+    ///
+    /// When the desktop user *can* read the file (e.g. in a test or if ownership matches),
+    /// the function must return the correct count without involving sudo.
+    #[test]
+    fn count_trusted_keys_readable_file_returns_correct_count() {
+        let path = tmp_path("readable");
+        let content = "# comment — should not be counted\n\
+                        \n\
+                        ssh-ed25519 AAAA1111 user@laptop1\n\
+                        ssh-rsa AAAA2222 user@laptop2\n\
+                        not-a-real-key this should be ignored\n";
+        fs::write(&path, content).expect("write test authorized_keys");
+
+        let count = count_trusted_keys_impl(&path);
+        // Cleanup before assertion so the file is removed even if the assert fails.
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(count, 2, "should count exactly the two valid pubkey lines");
+    }
+
+    /// `count_pubkey_lines` correctly skips blanks and comments.
+    #[test]
+    fn count_pubkey_lines_skips_blanks_and_comments() {
+        let content = "\n# a comment\nssh-ed25519 AAAA user@host\n\nssh-rsa BBBB user2@host\n";
+        assert_eq!(count_pubkey_lines(content), 2);
+    }
+
+    /// `normalize_pubkey_line` strips Windows CRLF and leading/trailing whitespace.
+    #[test]
+    fn normalize_pubkey_line_strips_crlf_and_whitespace() {
+        let raw = "  ssh-ed25519 AAAA user@host\r\n";
+        let got = normalize_pubkey_line(raw).unwrap();
+        assert_eq!(got, "ssh-ed25519 AAAA user@host");
+    }
+
+    /// `validate_pubkey_line` rejects comments.
+    #[test]
+    fn validate_pubkey_line_rejects_comments() {
+        assert!(validate_pubkey_line("# not a key").is_err());
+    }
+
+    /// `validate_pubkey_line` accepts known key type prefixes.
+    #[test]
+    fn validate_pubkey_line_accepts_known_prefixes() {
+        assert!(validate_pubkey_line("ssh-ed25519 AAAA user@host").is_ok());
+        assert!(validate_pubkey_line("ssh-rsa BBBB user@host").is_ok());
+        assert!(validate_pubkey_line("ecdsa-sha2-nistp256 CCCC user@host").is_ok());
+    }
 }

@@ -111,16 +111,29 @@ pub async fn ensure_remote_dir_exists(
 
 /// Shared success path for `ssh` runs — preserves raw stdout bytes without trimming.
 ///
+/// On non-zero exit, raw SSH stderr is captured and logged at `debug` level for diagnostics,
+/// but is **not** included in the returned error message.  Surfacing raw SSH stderr to the UI
+/// exposes internal detail (host fingerprints, paths, `Permission denied (publickey,password)`)
+/// that is not actionable for the end-user and may be security-sensitive.
+///
+/// # Returns
+///
+/// `Ok(Output)` on exit status 0; otherwise `Err(BackrError::Remote)` with a user-safe message.
+///
 /// External: `tokio::process::Command::output` captures merged streams from the local `ssh` child.
 async fn command_output(mut cmd: Command) -> Result<std::process::Output, BackrError> {
     let out = cmd.output().await.map_err(BackrError::Io)?;
     if !out.status.success() {
+        // Log full detail at debug level for operator diagnostics — not surfaced to the UI.
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(BackrError::Remote(format!(
-            "ssh remote command failed (status {:?}): {}",
+        tracing::debug!(
+            "SSH command failed (status {:?}): {}",
             out.status.code(),
             stderr.trim()
-        )));
+        );
+        return Err(BackrError::Remote(
+            "SSH command failed — check host connectivity and SSH key trust".to_string(),
+        ));
     }
     Ok(out)
 }
@@ -221,9 +234,11 @@ pub async fn test_connection(
     if out.trim() == "backr_ok" {
         Ok(())
     } else {
-        Err(BackrError::Remote(format!(
-            "unexpected handshake output: {out}"
-        )))
+        // Log the unexpected output at debug level — do not surface raw SSH output to the UI.
+        tracing::debug!("SSH handshake got unexpected output: {:?}", out.trim());
+        Err(BackrError::Remote(
+            "SSH handshake failed — verify the host address, SSH key, and port".to_string(),
+        ))
     }
 }
 
