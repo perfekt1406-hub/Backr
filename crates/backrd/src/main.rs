@@ -8,23 +8,30 @@
  *     socket file left from a previous run.
  *  4. Bind a `UnixListener` on that path.
  *  5. Allocate `Arc<DaemonState>`.
- *  6. Accept client connections in a loop, spawning one Tokio task per
- *     connection via `ipc::handle_connection`.
+ *  6. Create the IPC broadcast channel (`tokio::sync::broadcast`).
+ *  7. Start the scheduler if a config file already exists on disk.
+ *  8. Accept client connections in a loop, spawning one Tokio task per
+ *     connection via `ipc::handle_connection` with a fresh channel subscription.
  *
- * The scheduler (U4) and tray integration (U6) will be wired in here in
- * subsequent units; for now the daemon is a pure IPC server.
+ * Backup logic (U5) and system-tray integration (U6) will be wired in here in
+ * subsequent units.
  */
 
 mod daemon_state;
+mod event_sink;
 mod ipc;
+mod scheduler;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
+use tokio::sync::broadcast;
 use tracing::{error, info};
 
-use daemon_state::DaemonState;
+use crate::daemon_state::DaemonState;
+use crate::ipc::protocol::IpcEvent;
+use crate::scheduler::start_scheduler_if_configured;
 
 /// Returns the Unix socket path, preferring `$XDG_RUNTIME_DIR/backr/backrd.sock`
 /// and falling back to `~/.local/share/backr/backrd.sock` (KTD-2).
@@ -113,13 +120,27 @@ async fn main() {
     // Shared daemon state cloned into every connection handler task.
     let state = Arc::new(DaemonState::new());
 
+    // Broadcast channel for pushing IpcEvent messages to all connected clients.
+    // Channel capacity 256: burst of up to 256 unread events per receiver before
+    // the receiver starts lagging (logged and skipped in the forwarder task).
+    let (event_tx, _) = broadcast::channel::<IpcEvent>(256);
+
+    // Attempt to start the scheduler using any config already on disk.
+    // If no config file exists this is a no-op; the scheduler will be (re)started
+    // by the config-save handler in U5.
+    start_scheduler_if_configured(Arc::clone(&state), event_tx.clone()).await;
+
     // Accept loop: one Tokio task per connection.
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let state = Arc::clone(&state);
+                // Each connection gets its own receiver so events are delivered
+                // independently; this subscribe() call must happen before spawning
+                // so events emitted between accept() and task start are not lost.
+                let event_rx = event_tx.subscribe();
                 tokio::spawn(async move {
-                    ipc::handle_connection(stream, state).await;
+                    ipc::handle_connection(stream, state, event_rx).await;
                 });
             }
             Err(e) => {

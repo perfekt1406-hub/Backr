@@ -10,6 +10,7 @@
  */
 
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
@@ -33,7 +34,9 @@ pub struct DaemonState {
     pub last_backup_at: Mutex<Option<DateTime<Utc>>>,
 
     /// Tokio task handle and cancellation token for the periodic backup scheduler.
-    pub scheduler: SchedulerState,
+    /// Stored as `Arc` so it can be passed directly to `restart_scheduler` without
+    /// requiring an additional `Arc` wrapper at the call site.
+    pub scheduler: Arc<SchedulerState>,
 
     /// Active pairing session (host side), or `None` when not pairing.
     pub pairing: Mutex<Option<PairingSession>>,
@@ -46,7 +49,7 @@ impl DaemonState {
             config: Mutex::new(None),
             in_progress: AtomicBool::new(false),
             last_backup_at: Mutex::new(None),
-            scheduler: SchedulerState::new(),
+            scheduler: Arc::new(SchedulerState::new()),
             pairing: Mutex::new(None),
         }
     }
