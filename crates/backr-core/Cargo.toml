@@ -30,3 +30,4 @@ shellexpand        = { workspace = true }
 rand               = { workspace = true }
 tiny_http          = { workspace = true }
 mdns-sd            = { workspace = true }
+tokio-util         = { workspace = true }
