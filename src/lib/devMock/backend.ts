@@ -11,7 +11,7 @@ import type {
 } from "../../types/hostDashboard";
 import type { AuthorizedPubkeyEntry, HostRemovePubkeyResult, HostTrustAppendResult, HostTrustStatus } from "../../types/hostTrust";
 import type { Config } from "../../types/config";
-import type { DiscoveredHost, PairingStarted } from "../../types/pairing";
+import type { DiscoveredHost, PairDraft, PairingStarted } from "../../types/pairing";
 import type { BackupStatus, ProjectInfo } from "../../types/project";
 import type { ShellBootstrap } from "../../types/shellBootstrap";
 import type { SystemInfo } from "../../types/systemInfo";
@@ -476,8 +476,8 @@ export async function mockDiscoverHosts(): Promise<DiscoveredHost[]> {
   ];
 }
 
-/** Client: pretends to pair and returns a prefilled config draft. */
-export async function mockPairWithHost(address: string, code: string): Promise<Config> {
+/** Client: pretends to pair and returns a PairDraft with a fake fingerprint. */
+export async function mockPairWithHost(address: string, code: string): Promise<PairDraft> {
   void code;
   await delay(500);
   const host = address.split(":")[0] ?? "192.168.1.50";
@@ -485,5 +485,16 @@ export async function mockPairWithHost(address: string, code: string): Promise<C
   cfg.remote.host = host;
   cfg.remote.user = DEV_MOCK_HOST_SSH_USER;
   cfg.remote.backup_path = DEV_MOCK_HOST_BACKUP_ROOT;
-  return cfg;
+  return {
+    config: cfg,
+    host_key_fingerprint: "SHA256:mockFingerprintABCDEFGHIJKLMNOPQRSTUVWXYZ01",
+    host_pubkey: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockHostKey mock-host`,
+    ssh_target: host,
+  };
+}
+
+/** Client: confirms a pair draft and returns the finalized config. */
+export async function mockConfirmPairing(draft: PairDraft): Promise<Config> {
+  await delay(200);
+  return draft.config;
 }

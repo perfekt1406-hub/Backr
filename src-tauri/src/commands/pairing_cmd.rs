@@ -3,7 +3,9 @@
  *
  * `start_pairing` opens a time-boxed window: generates a 6-digit code, binds an
  * ephemeral pairing listener, advertises this host over mDNS, and auto-tears down
- * after the TTL. `stop_pairing` / `pairing_status` manage and report that window.
+ * after a 3-minute TTL. `stop_pairing` / `pairing_status` manage and report that
+ * window. Client-side commands (`discover_hosts`, `pair_with_host`, `confirm_pairing`)
+ * let a laptop find a host and complete pairing with fingerprint verification.
  *
  * All commands return `Result<T, BackrCommandError>` so the frontend receives a typed
  * `{ kind, message }` error object rather than a bare string.
@@ -18,12 +20,16 @@ use tiny_http::Server;
 
 use crate::config::Config;
 use crate::error::BackrCommandError;
-use crate::pairing::client::pair_with_host as do_pair_with_host;
+use crate::pairing::client::{confirm_pair_draft, pair_with_host as do_pair_with_host, PairDraft};
 use crate::pairing::code::PairingSession;
 use crate::pairing::discovery::{advertise, discover_hosts as do_discover_hosts, DiscoveredHost};
 use crate::pairing::listener::{gather_host_info, serve};
 use crate::pairing::PairingRuntime;
 use crate::state::AppState;
+
+/// Auto-teardown lifetime for a pairing window. After this duration with no successful
+/// pair, the listener closes and mDNS stops advertising.
+const PAIRING_TTL_SECS: u64 = 180; // 3 minutes
 
 /// Returned to the host UI when a pairing window opens.
 #[derive(serde::Serialize)]
@@ -32,8 +38,9 @@ pub struct PairingStarted {
     pub code: String,
 }
 
-/// Opens a pairing window (code + mDNS advertise + listener) that stays open until a
-/// laptop pairs or stop_pairing is called.
+/// Opens a pairing window (code + mDNS advertise + listener). The window stays open for
+/// at most `PAIRING_TTL_SECS` seconds (3 minutes) and then auto-closes. It also closes
+/// immediately when a laptop pairs or `stop_pairing` is called.
 #[tauri::command]
 pub async fn start_pairing(
     state: State<'_, Arc<AppState>>,
@@ -74,6 +81,19 @@ pub async fn start_pairing(
         thread: Some(handle),
     });
 
+    // Spawn a TTL task: after PAIRING_TTL_SECS, tear down the pairing window if it is
+    // still open. A prior successful pair will have already cleared pairing_runtime to
+    // None via serve(), so this task will no-op in that case.
+    let ttl_app = app.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(PAIRING_TTL_SECS)).await;
+        // Only tear down if the window is still open (not already closed by a pair or manual stop).
+        if ttl_app.pairing_runtime.lock().await.is_some() {
+            tracing::info!("pairing TTL expired — closing window");
+            stop_pairing_internal(&ttl_app).await;
+        }
+    });
+
     Ok(PairingStarted { code })
 }
 
@@ -100,15 +120,39 @@ pub async fn discover_hosts() -> Result<Vec<DiscoveredHost>, BackrCommandError> 
         .map_err(BackrCommandError::pairing)
 }
 
-/// Pairs this laptop with a discovered host using the 6-digit code; returns a
-/// prefilled config draft for the setup wizard.
+/// Pairs this laptop with a discovered host using the 6-digit code. Returns a `PairDraft`
+/// containing the prefilled config AND the host's SSH key fingerprint. The caller must
+/// show the fingerprint to the user for out-of-band verification before calling
+/// `confirm_pairing` to finalize (pin the host key and save the config).
+///
+/// # Inputs
+///
+/// * `address` — "ip:port" from `discover_hosts`.
+/// * `code`    — 6-digit code shown on the host screen.
 #[tauri::command]
-pub async fn pair_with_host(
-    address: String,
-    code: String,
-) -> Result<Config, BackrCommandError> {
+pub async fn pair_with_host(address: String, code: String) -> Result<PairDraft, BackrCommandError> {
     /* tokio::task::spawn_blocking runs the HTTP pairing exchange on a thread-pool thread. */
     tokio::task::spawn_blocking(move || do_pair_with_host(&address, &code))
+        .await
+        .map_err(|e| BackrCommandError::task_failed(e.to_string()))?
+        .map_err(BackrCommandError::pairing)
+}
+
+/// Finalizes a confirmed pair: pins the host's SSH key and returns the ready-to-save
+/// config. Call this only after the user has verified the fingerprint shown in the UI
+/// matches what is displayed on the host's Backr screen.
+///
+/// # Inputs
+///
+/// * `draft` — the `PairDraft` returned by `pair_with_host`.
+///
+/// # Returns
+///
+/// The finalized `Config` on success.
+#[tauri::command]
+pub async fn confirm_pairing(draft: PairDraft) -> Result<Config, BackrCommandError> {
+    /* confirm_pair_draft pins the host public key into known_hosts and returns the final Config. */
+    tokio::task::spawn_blocking(move || confirm_pair_draft(draft))
         .await
         .map_err(|e| BackrCommandError::task_failed(e.to_string()))?
         .map_err(BackrCommandError::pairing)

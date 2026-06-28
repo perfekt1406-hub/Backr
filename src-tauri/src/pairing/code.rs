@@ -2,10 +2,11 @@
  * Pairing code session.
  *
  * The 6-digit gate that authorizes one laptop to be trusted during a pairing
- * window. The window stays open until a laptop pairs or the host stops it (no
- * time limit), so security rests on two properties: single-use (consumed on the
- * first correct submission) and a fixed wrong-attempt budget that locks the
- * session. Validation is constant-time so it can't leak how many digits matched.
+ * window. The window now auto-closes after PAIRING_TTL_SECS (3 minutes) via a
+ * Tokio task in `commands/pairing_cmd.rs`. Security rests on two properties:
+ * single-use (consumed on the first correct submission) and a fixed wrong-attempt
+ * budget that locks the session. Validation is constant-time so it can't leak how
+ * many digits matched.
  */
 
 use rand::Rng;
@@ -140,5 +141,40 @@ mod tests {
         assert!(!constant_time_eq(b"123456", b"123457"));
         assert!(!constant_time_eq(b"023456", b"123456"));
         assert!(!constant_time_eq(b"12345", b"123456")); // length mismatch
+    }
+
+    /// A pair attempt against an already-consumed session returns `AlreadyUsed`, not
+    /// `Valid`. This simulates what happens when the TTL fires after a successful pair:
+    /// the session is consumed, so any residual request correctly bounces.
+    #[test]
+    fn consumed_session_rejects_further_attempts() {
+        let mut s = PairingSession::new();
+        let code = s.code().to_string();
+        // First use — valid.
+        assert_eq!(s.validate(&code), CodeValidation::Valid);
+        // Subsequent attempts with the same correct code are rejected.
+        assert_eq!(s.validate(&code), CodeValidation::AlreadyUsed);
+        // Wrong codes also return AlreadyUsed (not Invalid) — consumed trumps everything.
+        let bad = wrong_code(&code);
+        assert_eq!(s.validate(&bad), CodeValidation::AlreadyUsed);
+    }
+
+    /// Simulates the TTL task finding no active pairing window: calling `take()` on a
+    /// `None` pairing_runtime must be safe and produce no double-free or panic.
+    /// (The actual state machinery lives in `pairing_cmd.rs`; this tests the Rust
+    /// ownership semantics that make the no-op safe via `Option::take`.)
+    #[test]
+    fn ttl_teardown_on_already_closed_window_is_safe() {
+        // Simulate what stop_pairing_internal does: take from an Option<PairingRuntime>.
+        let mut slot: Option<u32> = None; // stand-in for Option<PairingRuntime>
+        // First take — already None; should not panic.
+        assert!(slot.take().is_none());
+        // Second take — also None; idempotent.
+        assert!(slot.take().is_none());
+        // A runtime that was already consumed (Some then taken).
+        slot = Some(42);
+        assert_eq!(slot.take(), Some(42));
+        // Now the TTL fires and tries to take again — safe no-op.
+        assert!(slot.take().is_none());
     }
 }

@@ -129,6 +129,7 @@ pub fn run() {
             commands::pairing_cmd::pairing_status,
             commands::pairing_cmd::discover_hosts,
             commands::pairing_cmd::pair_with_host,
+            commands::pairing_cmd::confirm_pairing,
             commands::system_cmd::get_system_info,
             commands::project_cmd::list_projects,
             commands::project_cmd::get_backup_status,
