@@ -1536,10 +1536,46 @@ EOF
 }
 
 #
+# Adds nss-mdns to /etc/nsswitch.conf's hosts line when absent so glibc (and thus ssh/
+# rsync) resolves `.local` names. Inserts `mdns4_minimal [NOTFOUND=return]` right after
+# `files`. Debian's libnss-mdns auto-configures this; Arch and others do not.
+# Inputs: none. Outputs: edits /etc/nsswitch.conf in-place or warns on failure.
+#
+ensure_nsswitch_mdns() {
+  local f=/etc/nsswitch.conf
+  [[ -f "$f" ]] || { echo "warning: ${f} missing; cannot enable mdns resolution." >&2; return 0; }
+  if grep -qE '^hosts:.*mdns' "$f"; then
+    echo "nsswitch.conf already resolves mdns."
+    return 0
+  fi
+  sed -i -E '/^hosts:/{ /mdns/! s/\bfiles\b/files mdns4_minimal [NOTFOUND=return]/ }' "$f" \
+    && echo "Added mdns4_minimal to ${f} hosts line." \
+    || echo "warning: could not edit ${f}; add 'mdns4_minimal [NOTFOUND=return]' to the hosts line manually." >&2
+}
+
+#
+# Enables and starts the avahi daemon (systemd or OpenRC) so this host publishes and
+# resolves `.local` mDNS names. Best-effort: warns instead of failing setup.
+# Inputs: none. Outputs: enables/starts avahi-daemon or prints a warning.
+#
+enable_avahi_daemon() {
+  if command -v systemctl &>/dev/null; then
+    systemctl enable --now avahi-daemon 2>/dev/null \
+      || systemctl enable --now avahi-daemon.service 2>/dev/null \
+      || echo "warning: could not enable avahi-daemon; start it manually so the .local name is published." >&2
+  elif command -v rc-update &>/dev/null; then
+    rc-update add avahi-daemon default 2>/dev/null || true
+    rc-service avahi-daemon start 2>/dev/null || true
+  fi
+}
+
+#
 # Ensures this host publishes its `.local` mDNS name (e.g. archlinux.local) so paired
 # laptops can reach it by name and keep backing up across DHCP IP changes. Installs and
 # enables avahi (+ nss-mdns so the host resolves `.local` too) and adds mdns to nsswitch
 # on distros that don't auto-configure it. Best-effort: warns instead of failing setup.
+# Inputs: none. Outputs: installs packages via detect_pkg_backend, then calls
+#         ensure_nsswitch_mdns and enable_avahi_daemon.
 #
 ensure_host_mdns_publish() {
   local backend
@@ -1557,21 +1593,8 @@ ensure_host_mdns_publish() {
 
   [[ "$DRY_RUN" -eq 1 ]] && return 0
 
-  local nss=/etc/nsswitch.conf
-  if [[ -f "$nss" ]] && ! grep -qE '^hosts:.*mdns' "$nss"; then
-    sed -i -E '/^hosts:/{ /mdns/! s/\bfiles\b/files mdns4_minimal [NOTFOUND=return]/ }' "$nss" \
-      && echo "Added mdns4_minimal to ${nss}." \
-      || echo "warning: could not edit ${nss}; add mdns4_minimal to the hosts line manually." >&2
-  fi
-
-  if command -v systemctl &>/dev/null; then
-    systemctl enable --now avahi-daemon 2>/dev/null \
-      || systemctl enable --now avahi-daemon.service 2>/dev/null \
-      || echo "warning: could not enable avahi-daemon; start it manually so the .local name is published." >&2
-  elif command -v rc-update &>/dev/null; then
-    rc-update add avahi-daemon default 2>/dev/null || true
-    rc-service avahi-daemon start 2>/dev/null || true
-  fi
+  ensure_nsswitch_mdns
+  enable_avahi_daemon
 }
 
 main() {

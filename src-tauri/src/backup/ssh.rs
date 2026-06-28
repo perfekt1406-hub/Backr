@@ -378,6 +378,9 @@ pub async fn remote_list_children(
 ///
 /// * `accept_new` — enables accepting new host keys during backups.
 /// * `ssh_port` — target TCP port for `ssh`.
+///
+/// TODO(U4): add ControlMaster / ControlPath / ControlPersist options to multiplex
+/// repeated SSH connections over a single socket and avoid per-call handshake latency.
 fn ssh_base_command(ssh_key: &str, known_hosts: &Path, accept_new: bool, ssh_port: u16) -> Command {
     let mut c = Command::new("ssh");
     c.arg("-p").arg(ssh_port.to_string());

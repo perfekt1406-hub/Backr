@@ -6,7 +6,7 @@
  * code against the active PairingSession, trusts the laptop's public key through
  * the same path as the Trust-keys UI, and returns this host's connection details
  * so the laptop can prefill its setup. The start/stop lifecycle and mDNS
- * advertisement live in `commands/pairing_cmd.rs` (U4); this module holds the
+ * advertisement live in `commands/pairing_cmd.rs`; this module holds the
  * request logic and the blocking serve loop.
  */
 
@@ -142,7 +142,8 @@ fn json_header() -> tiny_http::Header {
 
 /// Blocking serve loop for the pairing window. Runs on a dedicated OS thread (never a
 /// Tokio worker — it uses `blocking_lock`). Returns after one successful pair; the
-/// caller (U4) also tears it down on timeout/cancel by dropping the server.
+/// caller also tears it down on explicit cancel by calling `PairingRuntime::shutdown`,
+/// which unblocks `incoming_requests` via `Server::unblock`.
 pub fn serve(server: Arc<Server>, state: Arc<AppState>, host: HostPairInfo) {
     let mut paired = false;
     for request in server.incoming_requests() {
@@ -153,8 +154,8 @@ pub fn serve(server: Arc<Server>, state: Arc<AppState>, host: HostPairInfo) {
     }
     if paired {
         // A successful pair closes the window immediately: remove the runtime
-        // (without joining our own thread) and stop advertising. A later TTL
-        // teardown then finds nothing and no-ops.
+        // (without joining our own thread) and stop advertising. A later
+        // stop_pairing call then finds nothing to tear down and no-ops.
         let runtime = state.pairing_runtime.blocking_lock().take();
         if let Some(rt) = runtime {
             let _ = rt.mdns.unregister(&rt.fullname);
