@@ -127,16 +127,16 @@
 {/if}
 
 <div class="flex h-screen bg-[var(--bg)] text-[var(--text)]">
-  <SidebarNav />
-  <main class="flex min-h-0 min-w-0 flex-1 flex-col border-l border-[var(--border)] bg-[var(--bg)]">
-    {#if checking}
-      <div
-        class="flex flex-1 items-center justify-center label-caps tracking-[0.2em] text-[var(--muted)]"
-      >
-        Initializing shell…
-      </div>
-    {:else}
+  {#if checking}
+    <div
+      class="flex flex-1 items-center justify-center label-caps tracking-[0.2em] text-[var(--muted)]"
+    >
+      Initializing shell…
+    </div>
+  {:else}
+    <SidebarNav />
+    <main class="flex min-h-0 min-w-0 flex-1 flex-col border-l border-[var(--border)] bg-[var(--bg)]">
       <Router {routes} />
-    {/if}
-  </main>
+    </main>
+  {/if}
 </div>

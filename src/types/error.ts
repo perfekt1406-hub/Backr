@@ -5,12 +5,21 @@
  *   { "kind": "<Kind>", "message": "<human-readable description>" }
  *
  * The frontend can switch on `kind` to show context-aware error UI without parsing
- * human-readable message strings.
+ * human-readable message strings. Keep in sync with `src-tauri/src/error.rs`.
  */
 
 /**
  * Discriminant values that map 1-to-1 with the Rust `ErrorKind` enum variants.
- * Keep in sync with `src-tauri/src/error.rs`.
+ *
+ * - `NotConfigured`    — no configuration saved yet; navigate to setup.
+ * - `BackupInProgress` — a job is already running; show a non-fatal notice.
+ * - `SshFailed`        — SSH remote operation failed; show the message.
+ * - `RsyncFailed`      — rsync transfer failed; show the message.
+ * - `Io`               — local filesystem error.
+ * - `InvalidInput`     — caller-supplied value was rejected by validation.
+ * - `Config`           — TOML parse/save error.
+ * - `Pairing`          — mDNS or HTTP pairing failure.
+ * - `TaskFailed`       — tokio spawn_blocking join error.
  */
 export type ErrorKind =
   | "NotConfigured"
@@ -22,6 +31,9 @@ export type ErrorKind =
   | "Config"
   | "Pairing"
   | "TaskFailed";
+
+/** Alias kept for compatibility with code that imports `BackrErrorKind`. */
+export type BackrErrorKind = ErrorKind;
 
 /**
  * Typed error returned from every Tauri command when the result is `Err`.
