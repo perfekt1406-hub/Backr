@@ -87,6 +87,30 @@ impl DaemonState {
             .clone()
             .ok_or_else(BackrCommandError::not_configured)
     }
+
+    /// Loads `config.toml` from disk into [`config`](Self::config) when present.
+    ///
+    /// Must be called once at daemon startup: `DaemonState::new()` starts with
+    /// `config = None`, and the only other writers are the `save_config` handler and
+    /// the post-backup update. Without this hydration a configured client's daemon
+    /// comes up unconfigured after every (re)start — the scheduler never starts and
+    /// every config-reading command (`get_config`, `get_backup_status`, `list_*`,
+    /// `run_backup`) returns `NotConfigured` until the GUI next calls `save_config`.
+    ///
+    /// A missing config file is treated as first-launch (left as `None`); a read or
+    /// parse error is logged and also left as `None` so the daemon still serves setup.
+    pub async fn hydrate_config_from_disk(&self) {
+        /* config::load_config returns Ok(None) when config.toml is absent, Ok(Some) when parsed. */
+        match backr_core::config::load_config() {
+            Ok(Some(cfg)) => {
+                *self.config.lock().await = Some(cfg);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("failed to load configuration at startup: {e}");
+            }
+        }
+    }
 }
 
 impl Default for DaemonState {
@@ -153,5 +177,75 @@ impl PairingStateAccess for DaemonState {
     /// `Some(PairingRuntime)` if a window was open, `None` if already torn down.
     fn take_pairing_runtime(&self) -> Option<PairingRuntime> {
         self.pairing_runtime.blocking_lock().take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use backr_core::config::{
+        save_config, Config, LocalConfig, RemoteConfig, ScheduleConfig, StateConfig,
+    };
+
+    /// Regression test for the startup-hydration bug: a daemon coming up with an
+    /// existing `config.toml` on disk must load it into `state.config`. Otherwise the
+    /// scheduler never starts and every config-reading command returns `NotConfigured`
+    /// until the GUI happens to re-save. Drives `config_path()` (via `dirs::config_dir`)
+    /// at a temp `XDG_CONFIG_HOME` so the real on-disk path is exercised in isolation.
+    #[tokio::test]
+    async fn hydrate_loads_existing_config_from_disk() {
+        let tmp = std::env::temp_dir().join(format!(
+            "backrd-hydrate-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &tmp);
+
+        // No config on disk yet → hydration leaves the daemon unconfigured.
+        let state = DaemonState::new();
+        state.hydrate_config_from_disk().await;
+        assert!(
+            state.config.lock().await.is_none(),
+            "absent config.toml should leave state unconfigured"
+        );
+
+        // Persist a config, then a freshly-constructed daemon must pick it up at startup.
+        let cfg = Config {
+            remote: RemoteConfig {
+                host: "nas.local".into(),
+                user: "backr".into(),
+                ssh_key: "/tmp/backr-test-key".into(),
+                port: 22,
+                backup_path: "/srv/backups".into(),
+            },
+            local: LocalConfig {
+                projects_path: "/tmp/backr-test-projects".into(),
+            },
+            schedule: ScheduleConfig { interval_hours: 6 },
+            state: StateConfig {
+                last_backup_at: None,
+            },
+        };
+        save_config(&cfg).unwrap();
+
+        let state = DaemonState::new();
+        state.hydrate_config_from_disk().await;
+        let loaded = state.config.lock().await.clone();
+        assert_eq!(
+            loaded.as_ref(),
+            Some(&cfg),
+            "daemon startup must hydrate the existing config from disk"
+        );
+
+        // Restore env so this test cannot leak into others in this binary.
+        match prev {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

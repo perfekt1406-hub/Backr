@@ -119,6 +119,12 @@ async fn main() {
     // Shared daemon state cloned into every connection handler task.
     let state = Arc::new(DaemonState::new());
 
+    // Load any existing config.toml into memory before starting the scheduler or
+    // serving requests. Without this the daemon comes up unconfigured after every
+    // (re)start: scheduled backups would never run and config-reading commands would
+    // return NotConfigured until the GUI next called save_config.
+    state.hydrate_config_from_disk().await;
+
     // Broadcast channel for pushing IpcEvent messages to all connected clients.
     // Channel capacity 256: burst of up to 256 unread events per receiver before
     // the receiver starts lagging (logged and skipped in the forwarder task).
