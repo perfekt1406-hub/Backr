@@ -29,6 +29,8 @@
   let inventoryErr = $state<string | null>(null);
   let sortMode = $state<"name" | "activity">("name");
   let lastRefreshedAt = $state<string | null>(null);
+  /** True while a refresh (incl. a forced `du` rescan) is in flight — disables the action buttons. */
+  let refreshing = $state(false);
 
   /** Sorted copy of [`rows`] according to [`sortMode`] for stable rendering. */
   const sortedRows = $derived.by(() => {
@@ -80,34 +82,39 @@
     }
     loadErr = null;
     const forceDu = opts?.forceDiskInventory ?? false;
+    refreshing = true;
 
-    const [projectsOut, volumeOut, inventoryOut] = await Promise.allSettled([
-      commands.hostListSnapshotProjects(root),
-      commands.hostVolumeSummary(root),
-      commands.hostDiskInventory(root, forceDu),
-    ]);
+    try {
+      const [projectsOut, volumeOut, inventoryOut] = await Promise.allSettled([
+        commands.hostListSnapshotProjects(root),
+        commands.hostVolumeSummary(root),
+        commands.hostDiskInventory(root, forceDu),
+      ]);
 
-    if (projectsOut.status === "fulfilled") {
-      rows = projectsOut.value;
-    } else {
-      rows = [];
-      loadErr = String(projectsOut.reason);
+      if (projectsOut.status === "fulfilled") {
+        rows = projectsOut.value;
+      } else {
+        rows = [];
+        loadErr = String(projectsOut.reason);
+      }
+
+      if (volumeOut.status === "fulfilled") {
+        volume = volumeOut.value;
+      } else {
+        volume = null;
+      }
+
+      if (inventoryOut.status === "fulfilled") {
+        inventory = inventoryOut.value;
+        inventoryErr = null;
+      } else {
+        inventoryErr = String(inventoryOut.reason);
+      }
+
+      lastRefreshedAt = new Date().toISOString();
+    } finally {
+      refreshing = false;
     }
-
-    if (volumeOut.status === "fulfilled") {
-      volume = volumeOut.value;
-    } else {
-      volume = null;
-    }
-
-    if (inventoryOut.status === "fulfilled") {
-      inventory = inventoryOut.value;
-      inventoryErr = null;
-    } else {
-      inventoryErr = String(inventoryOut.reason);
-    }
-
-    lastRefreshedAt = new Date().toISOString();
   }
 
   onMount(() => {
@@ -182,10 +189,11 @@
     </div>
     <button
       type="button"
-      class="shrink-0 text-[11px] uppercase tracking-[0.14em] text-[var(--accent)] hover:text-[var(--accent-hover)]"
+      class="shrink-0 text-[11px] uppercase tracking-[0.14em] text-[var(--accent)] hover:text-[var(--accent-hover)] disabled:opacity-50"
+      disabled={refreshing}
       onclick={() => void refresh()}
     >
-      Refresh
+      {refreshing ? "Refreshing…" : "Refresh"}
     </button>
   </header>
 
@@ -333,10 +341,11 @@
         </div>
         <button
           type="button"
-          class="text-[11px] uppercase tracking-[0.14em] text-[var(--accent)] hover:text-[var(--accent-hover)]"
+          class="text-[11px] uppercase tracking-[0.14em] text-[var(--accent)] hover:text-[var(--accent-hover)] disabled:opacity-50"
+          disabled={refreshing}
           onclick={() => void refresh({ forceDiskInventory: true })}
         >
-          Rescan folder sizes
+          {refreshing ? "Rescanning…" : "Rescan folder sizes"}
         </button>
       </div>
     </div>

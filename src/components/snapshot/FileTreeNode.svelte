@@ -32,6 +32,8 @@
   let loading = $state(false);
   let children = $state<FileEntry[]>([]);
   let hydrated = $state(false);
+  /** Non-null when listing this directory failed, so the row can surface it instead of silently showing nothing. */
+  let error = $state<string | null>(null);
 
   /** Remote relative path passed into `list_files` for this node's directory payload. */
   const pathForListing = $derived(
@@ -51,6 +53,7 @@
   /** Loads immediate children once per expansion cycle with cross-node caching. */
   async function hydrate(): Promise<void> {
     loading = true;
+    error = null;
     try {
       const key = filesCacheKey(project, snapshot, pathForListing);
       const cache = get(filesCache);
@@ -64,6 +67,10 @@
         children = sorted;
       }
       hydrated = true;
+    } catch (err) {
+      // Surface the failure on this row; without this the chevron just opened to nothing.
+      error = err instanceof Error ? err.message : String(err);
+      hydrated = false;
     } finally {
       loading = false;
     }
@@ -118,6 +125,15 @@
       <span class="ml-auto text-[10px] uppercase tracking-[0.14em] text-[var(--muted)]">…</span>
     {/if}
   </button>
+
+  {#if entry.is_dir && expanded && error}
+    <p
+      style={`padding-left:${(depth + 1) * 14 + 8}px`}
+      class="py-1 text-[11px] text-[var(--warn)]"
+    >
+      {error}
+    </p>
+  {/if}
 
   {#if entry.is_dir && expanded && hydrated && children.length > 0}
     <ul class="mt-1 flex flex-col gap-1 border-l border-[var(--border)] pl-2">

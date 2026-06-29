@@ -16,6 +16,9 @@
 
   let { project, snap }: Props = $props();
 
+  /** True while the restore rsync is in flight — disables the button and shows progress text. */
+  let restoring = $state(false);
+
   const browseHref = $derived(
     `/project/${encodeURIComponent(project)}/${encodeURIComponent(snap.name)}`,
   );
@@ -28,11 +31,14 @@
     if (!ok) {
       return;
     }
+    restoring = true;
     try {
       const dest = await commands.restoreSnapshot(project, snap.name);
       window.alert(`Restore completed:\n${dest}`);
     } catch (err) {
       window.alert(String(err));
+    } finally {
+      restoring = false;
     }
   }
 </script>
@@ -54,11 +60,12 @@
     </a>
     <button
       type="button"
-      class="inline-flex items-center gap-2 rounded-[5px] border border-[var(--danger)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--danger)] hover:bg-[var(--bg4)]"
+      class="inline-flex items-center gap-2 rounded-[5px] border border-[var(--danger)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--danger)] hover:bg-[var(--bg4)] disabled:cursor-not-allowed disabled:opacity-50"
+      disabled={restoring}
       onclick={() => void restore()}
     >
       <Download size={14} aria-hidden="true" />
-      Restore
+      {restoring ? "Restoring…" : "Restore"}
     </button>
   </div>
 </div>
