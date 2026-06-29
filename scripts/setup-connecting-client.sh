@@ -804,10 +804,13 @@ install_appimage_from_network() {
   url="$APPIMAGE_URL_OVERRIDE"
   echo "Using AppImage URL from --appimage-url"
   tmp="$(download_appimage_to_tempfile "$url")" || die "failed to download AppImage"
-  trap 'rm -f "$tmp"' RETURN
   # Downloaded AppImages need libfuse2 at runtime.
   ensure_appimage_runtime_libs
   install_backr_app "$tmp" "Backr.AppImage"
+  # Explicit cleanup — a `trap ... RETURN` here would propagate up the call stack
+  # and re-fire on the caller's return, crashing under `set -u` (the local is
+  # then out of scope).
+  rm -f "$tmp"
 }
 
 #

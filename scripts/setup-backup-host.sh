@@ -1324,7 +1324,6 @@ install_host_app_from_appimage_url() {
   # Non-Arch: download pre-built AppImage.
   if tmp="$(download_appimage_to_tempfile "$HOST_APPIMAGE_URL" 2>/dev/null)"; then
     appimage_src="$tmp"
-    trap 'rm -f "$appimage_src"' RETURN
   else
     echo "Pre-built AppImage not available at ${HOST_APPIMAGE_URL} — falling back to source build …"
     local build_out
@@ -1335,16 +1334,23 @@ install_host_app_from_appimage_url() {
     }
     appimage_src="$(echo "$build_out" | tail -1)"
     built_src_dir="$(dirname "$(dirname "$(dirname "$(dirname "$appimage_src")")")")"
-    trap 'rm -rf "$built_src_dir"' RETURN
   fi
 
   install_host_appimage_binary "$appimage_src" "$target_user" "$target_home"
   # When the binary came from a source build (non-Arch fallback), install backrd
-  # from the same workspace before the source tree is removed by the trap above.
+  # from the same workspace before the source tree is removed below.
   if [[ -n "${built_src_dir:-}" ]]; then
     local backrd_from_build="${built_src_dir}/target/release/backrd"
     install_backrd_daemon_service_for_user "$target_user" "$target_home" "$backrd_from_build"
   fi
+
+  # Clean up the downloaded AppImage and/or source build tree.  This was
+  # previously done with `trap ... RETURN`, but a RETURN trap propagates up the
+  # call stack and re-fires when the caller (main) returns — at which point the
+  # local it references is out of scope, crashing the script under `set -u`.
+  if [[ -n "${tmp:-}" ]]; then rm -f "$tmp"; fi
+  if [[ -n "${built_src_dir:-}" ]]; then rm -rf "$built_src_dir"; fi
+  return 0
 }
 
 #
