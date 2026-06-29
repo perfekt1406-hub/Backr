@@ -196,7 +196,13 @@ mod inner {
     /// Returns `"never backed up"` when no backup has yet completed, or
     /// `"last backup: HH:MM UTC"` with the UTC hour and minute otherwise.
     ///
-    /// Uses `blocking_lock` so it can be called from both async and sync code.
+    /// Uses `try_lock` rather than `blocking_lock`: this runs on the Tokio main
+    /// thread at startup (`spawn_tray`) and on worker threads after a backup
+    /// (`update_label`), and `blocking_lock` panics ("cannot block the current
+    /// thread from within a runtime") when called inside the Tokio runtime.
+    /// The lock only ever guards a brief timestamp read/write, so it is
+    /// effectively always uncontended here; a rare contended read falls back to
+    /// the "never backed up" label and self-heals on the next update.
     ///
     /// # Parameters
     /// - `state` — Shared daemon state; reads `last_backup_at`.
@@ -204,8 +210,8 @@ mod inner {
     /// # Returns
     /// A `String` suitable for display in the tray tooltip.
     fn format_label(state: &DaemonState) -> String {
-        let guard = state.last_backup_at.blocking_lock();
-        match *guard {
+        let last = state.last_backup_at.try_lock().ok().and_then(|g| *g);
+        match last {
             None => "never backed up".into(),
             Some(ts) => format!("last backup: {}", ts.format("%H:%M UTC")),
         }
