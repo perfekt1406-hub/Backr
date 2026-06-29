@@ -62,7 +62,10 @@
               paired = true;
               broadcasting = false;
               code = null;
-              fingerprint = null;
+              // Keep `fingerprint` set: the laptop shows its copy and asks the user to
+              // verify it matches the host screen *after* pairing completes, so the host
+              // must still display the fingerprint in the paired state — not clear it the
+              // instant the laptop connects (which left nothing to compare against).
               clearPoll();
             }
           })
@@ -159,6 +162,20 @@
     <p class="{isInline ? '' : 'mt-4'} text-[13px] font-medium text-[var(--accent)]">
       ✓ Laptop paired — its key is trusted.
     </p>
+    {#if fingerprint}
+      <!-- Keep the fingerprint visible after pairing: the laptop asks the user to verify
+           it matches *now*, so it must remain on the host screen for the comparison. -->
+      <div class="mt-3 rounded-[6px] border border-[var(--border)] bg-[var(--bg4)] px-3 py-2.5">
+        <p class="label-caps mb-1 text-[var(--muted)]">This host's key fingerprint</p>
+        <p class="font-mono text-[12px] tracking-wide text-[var(--text)] select-all break-all">
+          {fingerprint}
+        </p>
+        <p class="mt-1.5 text-[11px] text-[var(--muted2)]">
+          Confirm this matches the fingerprint the laptop is showing before you approve there.
+          If they differ, remove this laptop's key from Trust-keys — you may have paired with the wrong host.
+        </p>
+      </div>
+    {/if}
     <button
       type="button"
       class="mt-3 self-start rounded-[6px] bg-[var(--accent)] px-5 py-2.5 text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--bg)] hover:bg-[var(--accent-hover)]"
