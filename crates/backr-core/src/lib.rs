@@ -14,6 +14,7 @@
  *  host_config      — Host-dashboard marker detection (reads /etc/backr/host.toml).
  *  host_disk_inventory — Disk usage inventory for the backup-host dashboard.
  *  host_trust       — authorized_keys management for the Trust-keys UI.
+ *  ipc_protocol     — Shared NDJSON IPC wire types (daemon⇄GUI single source of truth).
  *  progress_sink    — ProgressSink trait + CollectLines test helper.
  *  project_snapshot_cache — Per-project remote snapshot stats local cache.
  *  scheduler        — Periodic backup scheduler with BackupTrigger abstraction.
@@ -25,6 +26,7 @@ pub mod error;
 pub mod host_config;
 pub mod host_disk_inventory;
 pub mod host_trust;
+pub mod ipc_protocol;
 pub mod pairing;
 pub mod progress_sink;
 pub mod project_snapshot_cache;

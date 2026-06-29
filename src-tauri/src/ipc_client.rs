@@ -5,19 +5,28 @@
  * here.  The daemon owns all business logic; this module only handles framing
  * (NDJSON), event routing (backup_progress side-channel), and error mapping.
  *
+ * The wire types (`IpcRequest`/`IpcResponse`/`IpcEvent`/`IpcError`) are the
+ * shared definitions in `backr_core::ipc_protocol`, identical to the ones the
+ * daemon uses — so a request this client builds is exactly what the daemon
+ * deserializes (the `id` field is a `String` on both ends, enforced at compile
+ * time).
+ *
  * Protocol:
- *   → one NDJSON line: `{ "id": 1, "method": "…", "params": { … } }\n`
+ *   → one NDJSON line: `{ "id": "1", "method": "…", "params": { … } }\n`
  *   ← zero or more event lines: `{ "event": "backup_progress", "data": "…" }\n`
- *   ← one final response line:  `{ "id": 1, "result": … }\n`
- *                            or `{ "id": 1, "error": { "kind": "…", "message": "…" } }\n`
+ *   ← one final response line:  `{ "id": "1", "result": … }\n`
+ *                            or `{ "id": "1", "error": { "kind": "…", "message": "…" } }\n`
  */
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::Value;
 use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+use backr_core::ipc_protocol::{IpcError, IpcEvent, IpcRequest, IpcResponse};
 
 use crate::backup::rsync::BACKUP_PROGRESS_EVENT;
 use crate::error::{BackrCommandError, ErrorKind};
@@ -29,6 +38,23 @@ use crate::error::{BackrCommandError, ErrorKind};
 /// error (`invalid type: integer, expected a string`) while holding the connection
 /// open, which hangs the client's read loop forever.
 const REQUEST_ID: &str = "1";
+
+/// Idle (inter-line) read timeout for plain request/response calls.
+///
+/// These commands (config, bootstrap, status, …) reply effectively instantly, so
+/// a connected-but-silent daemon — e.g. one that accepted the connection but
+/// never answers — is a fault. Bounding the read turns that into a fast, legible
+/// error (surfaced by the GUI's "can't reach backrd" screen) instead of an
+/// indefinite hang. The timeout resets on every line received.
+const PLAIN_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Idle (inter-line) read timeout for progress-streaming calls (backup/restore).
+///
+/// rsync streams `--info=progress2` lines continuously, so any real transfer
+/// keeps resetting this. The bound only trips on total silence, generously sized
+/// so a slow initial file-list scan never false-trips while a genuinely wedged
+/// connection is still eventually surfaced rather than hanging forever.
+const STREAM_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Resolves the canonical path of the backrd Unix domain socket.
 ///
@@ -48,30 +74,21 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
-/// Converts a daemon error JSON object `{ "kind": "…", "message": "…" }` into a
-/// [`BackrCommandError`] by mapping the kind string to the closest [`ErrorKind`] variant.
+/// Converts a daemon [`IpcError`] into a [`BackrCommandError`] by mapping the
+/// kind string to the closest [`ErrorKind`] variant.
 ///
-/// Unknown kind strings fall through to `InvalidInput` so callers still receive a useful message.
+/// Unknown kind strings fall through to `InvalidInput` so callers still receive a
+/// useful message.
 ///
 /// # Inputs
 ///
-/// * `err_obj` — parsed JSON value (object) from the `"error"` field of a daemon response.
+/// * `err` — the `error` field of a daemon [`IpcResponse`].
 ///
 /// # Returns
 ///
 /// A [`BackrCommandError`] with a mapped kind and the daemon's message.
-fn map_daemon_error(err_obj: &Value) -> BackrCommandError {
-    let message = err_obj
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown daemon error")
-        .to_string();
-
-    let kind = match err_obj
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-    {
+fn map_daemon_error(err: &IpcError) -> BackrCommandError {
+    let kind = match err.kind.as_str() {
         "NotConfigured" => ErrorKind::NotConfigured,
         "SshFailed" => ErrorKind::SshFailed,
         "RsyncFailed" => ErrorKind::RsyncFailed,
@@ -84,7 +101,10 @@ fn map_daemon_error(err_obj: &Value) -> BackrCommandError {
         _ => ErrorKind::InvalidInput,
     };
 
-    BackrCommandError { kind, message }
+    BackrCommandError {
+        kind,
+        message: err.message.clone(),
+    }
 }
 
 /// Returns true when `parsed` is the final response line for our request — i.e. it
@@ -177,12 +197,14 @@ async fn send_inner(
 
     let (read_half, mut write_half) = stream.into_split();
 
-    // Build and send the NDJSON request line.
-    let request = serde_json::json!({
-        "id": REQUEST_ID,
-        "method": method,
-        "params": params,
-    });
+    // Build and send the NDJSON request line. Constructing the shared `IpcRequest`
+    // (rather than an ad-hoc JSON object) guarantees the wire shape the daemon
+    // expects — in particular a string `id`, which a numeric literal silently broke.
+    let request = IpcRequest {
+        id: REQUEST_ID.to_string(),
+        method: method.to_string(),
+        params,
+    };
     let mut line = serde_json::to_string(&request).map_err(|e| {
         BackrCommandError::config(format!("failed to serialize IPC request: {e}"))
     })?;
@@ -197,45 +219,64 @@ async fn send_inner(
     let reader = BufReader::new(read_half);
     let mut lines = reader.lines();
 
+    // Streaming calls (backup/restore) get a generous idle bound; plain calls a
+    // tight one. Either way a connected-but-silent daemon can't hang us forever.
+    let idle_timeout = if app_opt.is_some() {
+        STREAM_READ_IDLE_TIMEOUT
+    } else {
+        PLAIN_READ_IDLE_TIMEOUT
+    };
+
     loop {
-        let raw = lines
-            .next_line()
-            .await
-            .map_err(|e| BackrCommandError::io(format!("error reading from backrd socket: {e}")))?
-            .ok_or_else(|| {
-                BackrCommandError::io("backrd socket closed before sending a response".to_string())
-            })?;
+        // Bound each read so a daemon that accepted the connection but never
+        // answers surfaces as a clear error instead of blocking indefinitely.
+        let raw = match tokio::time::timeout(idle_timeout, lines.next_line()).await {
+            Err(_elapsed) => {
+                return Err(BackrCommandError::io(format!(
+                    "backrd accepted the connection but sent no response within {}s",
+                    idle_timeout.as_secs()
+                )));
+            }
+            Ok(read) => read
+                .map_err(|e| {
+                    BackrCommandError::io(format!("error reading from backrd socket: {e}"))
+                })?
+                .ok_or_else(|| {
+                    BackrCommandError::io(
+                        "backrd socket closed before sending a response".to_string(),
+                    )
+                })?,
+        };
 
         let parsed: Value = serde_json::from_str(&raw).map_err(|e| {
             BackrCommandError::io(format!("invalid JSON from backrd: {e} (raw: {raw:?})"))
         })?;
 
-        // If the line is an event, re-emit it and keep reading.
-        if let Some(event_name) = parsed.get("event").and_then(Value::as_str) {
-            if event_name == "backup_progress" {
-                if let Some(app) = app_opt {
-                    let data = parsed.get("data").cloned().unwrap_or(Value::Null);
-                    // Re-emit as the same event the frontend already subscribes to.
-                    let _ = app.emit(BACKUP_PROGRESS_EVENT, data);
+        // Event lines (identified by the `event` key, no `id`): re-emit progress
+        // and keep reading.
+        if parsed.get("event").is_some() {
+            if let Ok(ev) = serde_json::from_value::<IpcEvent>(parsed) {
+                if ev.event == "backup_progress" {
+                    if let Some(app) = app_opt {
+                        // Re-emit as the same event the frontend already subscribes to.
+                        let _ = app.emit(BACKUP_PROGRESS_EVENT, ev.data);
+                    }
                 }
+                // Other event types are silently ignored for forward-compatibility.
             }
-            // All other event types are silently ignored for forward-compatibility.
             continue;
         }
 
-        // Check if this is the final response for our request.
+        // Final response for our request id (the daemon echoes the String id verbatim).
         if is_final_response(&parsed, REQUEST_ID) {
-            // Daemon returned an error object.
-            if let Some(err_val) = parsed.get("error") {
-                return Err(map_daemon_error(err_val));
+            let response: IpcResponse = serde_json::from_value(parsed).map_err(|e| {
+                BackrCommandError::io(format!("malformed response from backrd: {e}"))
+            })?;
+            if let Some(err) = response.error {
+                return Err(map_daemon_error(&err));
             }
-
             // Success: return the result value (may be null for void commands).
-            let result = parsed
-                .get("result")
-                .cloned()
-                .unwrap_or(Value::Null);
-            return Ok(result);
+            return Ok(response.result.unwrap_or(Value::Null));
         }
 
         // Line has neither a matching id nor an event — ignore and keep reading.
@@ -247,18 +288,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The daemon's `IpcRequest.id` is a `String` (crates/backrd/src/ipc/protocol.rs).
-    /// Sending a JSON number makes the daemon reject the request as a parse error
-    /// while holding the connection open, hanging the client forever. Guard that the
-    /// id we emit serializes as a JSON string.
+    /// The shared `IpcRequest` types `id` as a `String`, so the client cannot emit a
+    /// numeric id — the drift that previously hung every call. Guard both that our id
+    /// serializes as a JSON string and that a numeric id is rejected on deserialize
+    /// (the daemon's exact failure mode).
     #[test]
     fn request_id_is_a_json_string() {
-        let request = json!({ "id": REQUEST_ID, "method": "get_config", "params": {} });
+        let request = IpcRequest {
+            id: REQUEST_ID.to_string(),
+            method: "get_config".to_string(),
+            params: json!({}),
+        };
+        let wire = serde_json::to_value(&request).expect("serialize request");
         assert!(
-            request["id"].is_string(),
+            wire["id"].is_string(),
             "id must serialize as a JSON string to satisfy the daemon's String-typed id"
         );
-        assert_eq!(request["id"], json!("1"));
+        assert_eq!(wire["id"], json!("1"));
+
+        // A request with a numeric id (the old hand-rolled client) fails to
+        // deserialize into the shared type — exactly how the daemon rejected it.
+        let numeric = json!({ "id": 1, "method": "get_config", "params": {} });
+        assert!(serde_json::from_value::<IpcRequest>(numeric).is_err());
+    }
+
+    /// A daemon error response deserializes into the shared `IpcResponse`/`IpcError`
+    /// (with `result` absent → `None`) and maps to a `BackrCommandError` carrying the
+    /// daemon's kind and message.
+    #[test]
+    fn error_response_maps_to_command_error() {
+        let line = json!({
+            "id": "1",
+            "error": { "kind": "NotConfigured", "message": "no config" },
+        });
+        let resp: IpcResponse = serde_json::from_value(line).expect("deserialize response");
+        let err = resp.error.expect("error field present");
+        let mapped = map_daemon_error(&err);
+        assert_eq!(mapped.message, "no config");
+        assert!(matches!(mapped.kind, ErrorKind::NotConfigured));
     }
 
     /// The daemon echoes the request id back as a string; the matcher must compare
