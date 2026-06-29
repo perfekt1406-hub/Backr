@@ -15,6 +15,13 @@ rust-version = "1.77.2"
 name = "backr_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Name the GUI binary "backr-app" (KTD-8) so the CLI crate can own the plain
+# "backr" name without an output-path collision in the shared workspace target/.
+# The daemon's tray ("Open Backr") and the GUI-spawn paths already exec backr-app.
+[[bin]]
+name = "backr-app"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.6.1", features = [] }
 

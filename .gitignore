@@ -4,7 +4,8 @@ node_modules/
 # Frontend build output
 dist/
 
-# Rust / Tauri
+# Rust / Tauri (workspace root target + legacy per-crate target)
+/target/
 src-tauri/target/
 
 # Environment and secrets

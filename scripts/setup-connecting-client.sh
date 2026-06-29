@@ -827,7 +827,19 @@ install_app_build_and_integrate() {
   # create it so the build doesn't fail on a fresh machine (curl one-liner).
   mkdir -p "$HOME/.cache/tauri"
   (cd "$REPO_ROOT" && npx tauri build --no-bundle)
-  install_backr_app "$(find_built_native_binary_path)" "backr"
+  # tauri build only compiles the GUI crate; the daemon and CLI are sibling
+  # workspace members, so build them explicitly (lands at target/release/).
+  echo "Building backrd daemon + backr CLI (cargo build --release) …"
+  (cd "$REPO_ROOT" && cargo build -p backrd -p backr-cli --release)
+  # Install the GUI as "backr-app" so the daemon tray's "Open Backr" item
+  # (which execs backr-app) resolves; the CLI name "backr" is left free for it.
+  install_backr_app "$(find_built_native_binary_path)" "backr-app"
+  # Expose the GUI on PATH under the name the daemon launches it by.
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$HOME/.local/share/backr/backr-app" "$HOME/.local/bin/backr-app"
+  # Install the backr CLI onto PATH so users can drive the daemon from a terminal.
+  install -m 755 "$REPO_ROOT/target/release/backr" "$HOME/.local/bin/backr"
+  echo "Installed backr CLI: $HOME/.local/bin/backr"
   # Install the backrd daemon binary and register it as a user service so it
   # runs persistently in the background from the first login after install.
   install_backrd_daemon_service
@@ -837,19 +849,22 @@ install_app_build_and_integrate() {
 # Finds the native binary produced by `tauri build --no-bundle`.
 #
 find_built_native_binary_path() {
-  local bin="$REPO_ROOT/src-tauri/target/release/backr"
+  # The Cargo workspace emits all artifacts to the repo-root target/, not
+  # src-tauri/target/ (which only applied before the daemon/GUI split).
+  # The GUI binary is named backr-app (KTD-8); backr is the CLI.
+  local bin="$REPO_ROOT/target/release/backr-app"
   [[ -f "$bin" ]] || die "build produced no binary at ${bin} — check the tauri build output"
   echo "$bin"
 }
 
 #
-# Finds the first built *.AppImage under src-tauri/target/release/bundle (only used
+# Finds the first built *.AppImage under target/release/bundle (only used
 # as a fallback by --reinstall-launcher when an AppImage was built previously).
 #
 find_built_appimage_path() {
   local hit=""
-  hit="$(find "$REPO_ROOT/src-tauri/target/release/bundle" -type f -name '*.AppImage' 2>/dev/null | head -n1 || true)"
-  [[ -n "$hit" ]] || die "build produced no .AppImage under src-tauri/target/release/bundle — check tauri bundle targets"
+  hit="$(find "$REPO_ROOT/target/release/bundle" -type f -name '*.AppImage' 2>/dev/null | head -n1 || true)"
+  [[ -n "$hit" ]] || die "build produced no .AppImage under target/release/bundle — check tauri bundle targets"
   echo "$hit"
 }
 
@@ -867,7 +882,7 @@ find_built_appimage_path() {
 # Outputs: installs and starts backrd as a user-session daemon.
 #
 install_backrd_daemon_service() {
-  local backrd_src="$REPO_ROOT/src-tauri/target/release/backrd"
+  local backrd_src="$REPO_ROOT/target/release/backrd"
   if [[ ! -f "$backrd_src" ]]; then
     echo "warning: backrd binary not found at ${backrd_src} — skipping daemon service install." >&2
     return 0
@@ -1131,14 +1146,16 @@ EOF
 #
 reinstall_backr_launcher_only() {
   local img="" name=""
-  if [[ -f "$HOME/.local/share/backr/backr" ]]; then
+  if [[ -f "$HOME/.local/share/backr/backr-app" ]]; then
+    img="$HOME/.local/share/backr/backr-app"; name="backr-app"
+  elif [[ -f "$HOME/.local/share/backr/backr" ]]; then
     img="$HOME/.local/share/backr/backr"; name="backr"
   elif [[ -f "$HOME/.local/share/backr/Backr.AppImage" ]]; then
     img="$HOME/.local/share/backr/Backr.AppImage"; name="Backr.AppImage"
-  elif [[ -f "$REPO_ROOT/src-tauri/target/release/backr" ]]; then
-    img="$REPO_ROOT/src-tauri/target/release/backr"; name="backr"
+  elif [[ -f "$REPO_ROOT/target/release/backr-app" ]]; then
+    img="$REPO_ROOT/target/release/backr-app"; name="backr-app"
   else
-    img="$(find "$REPO_ROOT/src-tauri/target/release/bundle" -type f -name '*.AppImage' 2>/dev/null | head -n1 || true)"; name="Backr.AppImage"
+    img="$(find "$REPO_ROOT/target/release/bundle" -type f -name '*.AppImage' 2>/dev/null | head -n1 || true)"; name="Backr.AppImage"
   fi
   [[ -n "$img" ]] && [[ -f "$img" ]] ||
     die "No installed or built Backr found (looked for ~/.local/share/backr/backr, an AppImage, or a release build) — run a full install first"
@@ -1156,7 +1173,9 @@ reinstall_backr_launcher_only() {
 uninstall_backr() {
   stop_running_backr
   local dir="$HOME/.local/share/backr"
-  rm -f "${dir}/backr" "${dir}/Backr.AppImage"
+  # "backr" is the legacy (pre-split) GUI name; "backr-app" is the current one.
+  rm -f "${dir}/backr" "${dir}/backr-app" "${dir}/Backr.AppImage"
+  rm -f "$HOME/.local/bin/backr-app" "$HOME/.local/bin/backr"
   rmdir "$dir" 2>/dev/null || true
   rm -f "$HOME/.local/share/applications/com.backr.app.desktop"
   rm -f "$HOME"/.local/share/icons/hicolor/*/apps/com.backr.app.png 2>/dev/null || true
@@ -1180,12 +1199,14 @@ remove_existing_install_if_present() {
   local dir="$HOME/.local/share/backr"
   local found=0
   [[ -f "${dir}/backr" ]] && found=1
+  [[ -f "${dir}/backr-app" ]] && found=1
   [[ -f "${dir}/Backr.AppImage" ]] && found=1
   [[ "$found" -eq 0 ]] && return 0
 
   echo "Existing Backr installation detected — removing before reinstall …"
   stop_running_backr
-  rm -f "${dir}/backr" "${dir}/Backr.AppImage"
+  rm -f "${dir}/backr" "${dir}/backr-app" "${dir}/Backr.AppImage"
+  rm -f "$HOME/.local/bin/backr-app"
   rmdir "$dir" 2>/dev/null || true
   rm -f "$HOME/.local/share/applications/com.backr.app.desktop"
   rm -f "$HOME"/.local/share/icons/hicolor/*/apps/com.backr.app.png 2>/dev/null || true
@@ -1260,7 +1281,9 @@ cleanup_temp_source() {
 #
 stop_running_backr() {
   command -v pkill &>/dev/null || return 0
-  if pkill -x backr 2>/dev/null || pkill -f '/Backr\.AppImage' 2>/dev/null; then
+  # "backr-app" is the current GUI process name; "backr" matches legacy installs.
+  if pkill -x backr-app 2>/dev/null || pkill -x backr 2>/dev/null \
+     || pkill -f '/Backr\.AppImage' 2>/dev/null; then
     echo "Stopped a running Backr instance so it can be updated."
     sleep 1
   fi

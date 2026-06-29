@@ -8,6 +8,9 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
+# Include ~/.local/bin so backrd can launch the GUI (backr-app) from the tray
+# "Open Backr" item; the rest covers system tools like ssh and rsync.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=BACKRD_BIN_PATH
 Restart=on-failure
 RestartSec=5

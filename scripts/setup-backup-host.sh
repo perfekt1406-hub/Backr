@@ -941,6 +941,9 @@ echo "Installing npm deps …"
 npm ci
 echo "Building Backr (tauri build — Rust compile takes 10-20 min on first run) …"
 npx tauri build
+# The daemon and CLI are sibling workspace members that tauri build skips.
+echo "Building backrd daemon + backr CLI (cargo build --release) …"
+cargo build -p backrd -p backr-cli --release
 USERSCRIPT
 
   # On Arch/pacman systems, use the raw binary (no AppImage wrapper) to avoid
@@ -948,7 +951,7 @@ USERSCRIPT
   local backend
   backend="$(detect_pkg_backend)"
   if [[ "$backend" == "pacman" ]]; then
-    local raw_binary="${src_dir}/src-tauri/target/release/backr"
+    local raw_binary="${src_dir}/target/release/backr-app"
     if [[ -f "$raw_binary" ]]; then
       echo "Build complete (native binary): ${raw_binary}"
       echo "NATIVE:${raw_binary}"
@@ -957,10 +960,10 @@ USERSCRIPT
   fi
 
   local appimage
-  appimage="$(find "$src_dir/src-tauri/target/release/bundle/appimage" -name "*.AppImage" 2>/dev/null | head -1)"
+  appimage="$(find "$src_dir/target/release/bundle/appimage" -name "*.AppImage" 2>/dev/null | head -1)"
   if [[ -z "$appimage" ]]; then
     rm -rf "$src_dir"
-    echo "warning: build completed but no AppImage found under src-tauri/target/release/bundle/appimage" >&2
+    echo "warning: build completed but no AppImage found under target/release/bundle/appimage" >&2
     return 1
   fi
 
@@ -1123,6 +1126,11 @@ install_host_appimage_binary() {
   mkdir -p "$dest_dir"
   install -m 755 -o "$target_user" -g "$target_user" "$src" "$dest"
   echo "Installed Backr AppImage: ${dest}"
+  # Expose the GUI on PATH as backr-app so the host tray's "Open Backr" resolves
+  # to the AppImage on hosts that installed the prebuilt bundle (no source build).
+  install -d -o "$target_user" -g "$target_user" "${target_home}/.local/bin"
+  ln -sf "$dest" "${target_home}/.local/bin/backr-app"
+  chown -h "$target_user:$target_user" "${target_home}/.local/bin/backr-app"
 }
 
 #
@@ -1197,7 +1205,9 @@ install_host_app_from_appimage_url() {
   if [[ "$force_source" -eq 1 ]]; then
     local dest_dir dest
     dest_dir="${target_home}/.local/share/backr"
-    dest="${dest_dir}/backr"
+    # GUI binary is named backr-app (KTD-8) so the daemon tray's "Open Backr"
+    # item (which execs backr-app) resolves; the CLI owns the plain "backr".
+    dest="${dest_dir}/backr-app"
 
     # A re-run always reinstalls/updates: rebuild from the latest source and
     # replace any existing binary instead of skipping.  Skipping a present binary
@@ -1211,7 +1221,8 @@ install_host_app_from_appimage_url() {
     fi
     # Remove the old binary and the now-obsolete .tauri-built marker left by
     # earlier script versions; the fresh build below replaces the binary.
-    rm -f "$dest" "${dest_dir}/.tauri-built"
+    # "${dest_dir}/backr" is the legacy (pre-split) GUI name.
+    rm -f "$dest" "${dest_dir}/backr" "${dest_dir}/.tauri-built"
 
     install_host_tauri_system_deps
 
@@ -1277,6 +1288,8 @@ install_host_app_from_appimage_url() {
       echo '── Step 2/2: tauri build --no-bundle (frontend + Rust — 10-20 min on first run) ──'
       mkdir -p \"\$HOME/.cache/tauri\"
       npx tauri build --no-bundle
+      echo '── Building backrd daemon + backr CLI (cargo build --release) ──'
+      cargo build -p backrd -p backr-cli --release
       echo '── Build complete ──'
     " || {
       echo "error: source build failed." >&2
@@ -1285,7 +1298,7 @@ install_host_app_from_appimage_url() {
       return 1
     }
 
-    local built_bin="${src_dir}/src-tauri/target/release/backr"
+    local built_bin="${src_dir}/target/release/backr-app"
     if [[ ! -f "$built_bin" ]]; then
       echo "error: build completed but binary not found at ${built_bin}" >&2
       rm -rf "$src_dir"
@@ -1296,8 +1309,13 @@ install_host_app_from_appimage_url() {
     mkdir -p "$dest_dir"
     install -m 755 -o "$target_user" -g "$target_user" "$built_bin" "$dest"
     echo "Installed native binary: ${dest}"
-    # Install the backrd daemon service before the source tree is removed.
-    local backrd_built="${src_dir}/src-tauri/target/release/backrd"
+    # Expose the GUI on PATH as backr-app so the host tray's "Open Backr" resolves.
+    install -d -o "$target_user" -g "$target_user" "${target_home}/.local/bin"
+    ln -sf "$dest" "${target_home}/.local/bin/backr-app"
+    chown -h "$target_user:$target_user" "${target_home}/.local/bin/backr-app"
+    # Install the backrd daemon service (also installs the backr CLI) before the
+    # source tree is removed.
+    local backrd_built="${src_dir}/target/release/backrd"
     install_backrd_daemon_service_for_user "$target_user" "$target_home" "$backrd_built"
     rm -rf "$src_dir"
     return 0
@@ -1324,7 +1342,7 @@ install_host_app_from_appimage_url() {
   # When the binary came from a source build (non-Arch fallback), install backrd
   # from the same workspace before the source tree is removed by the trap above.
   if [[ -n "${built_src_dir:-}" ]]; then
-    local backrd_from_build="${built_src_dir}/src-tauri/target/release/backrd"
+    local backrd_from_build="${built_src_dir}/target/release/backrd"
     install_backrd_daemon_service_for_user "$target_user" "$target_home" "$backrd_from_build"
   fi
 }
@@ -1362,6 +1380,14 @@ install_backrd_daemon_service_for_user() {
   local backrd_bin="${local_bin}/backrd"
   install -m 755 -o "$target_user" -g "$target_user" "$backrd_src" "$backrd_bin"
   echo "Installed backrd daemon binary: ${backrd_bin}"
+
+  # The backr CLI is built alongside backrd in the same target/release/ dir;
+  # install it onto PATH so the host operator can drive the daemon from a shell.
+  local cli_src="$(dirname "$backrd_src")/backr"
+  if [[ -f "$cli_src" ]]; then
+    install -m 755 -o "$target_user" -g "$target_user" "$cli_src" "${local_bin}/backr"
+    echo "Installed backr CLI: ${local_bin}/backr"
+  fi
 
   # Locate the service unit template; it lives alongside this script.
   local service_template="${SCRIPT_DIR}/backrd.service.template"
