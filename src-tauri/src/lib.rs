@@ -1,14 +1,16 @@
 /*
- * Library entry: wires configuration loading, tray installation, daemon connectivity, and commands.
+ * Library entry: wires configuration loading, daemon connectivity, and commands.
  *
  * The scheduler and rsync logic now live in the backrd daemon.  This file bootstraps the
  * Tauri window, verifies that the daemon socket is reachable (spawning backrd if needed),
- * registers the IPC proxy commands, and sets up the system tray.
+ * and registers the IPC proxy commands.  The system tray belongs to the always-resident
+ * backrd daemon, not the GUI: backr-app is an ephemeral window that exits when closed and
+ * reopens fresh on the next launch (or via the daemon tray's "Open Backr").
  *
  * Exposes [`run()`] consumed by the small `main.rs` binary wrapper.
  *
  * Business-logic modules now live in `backr_core` (the `crates/backr-core` crate).
- * Only Tauri-coupled modules remain here: commands, state, tray, and the Tauri-specific
+ * Only Tauri-coupled modules remain here: commands, state, and the Tauri-specific
  * parts of the progress sink and scheduler wiring.
  */
 
@@ -17,7 +19,6 @@ pub mod ipc_client;
 pub mod progress_sink;
 pub mod scheduler;
 pub mod state;
-pub mod tray;
 
 // Re-export backr_core modules so existing command code can use short paths where needed.
 // (Commands currently still use `crate::config`, `crate::backup`, etc. via re-exports.)
@@ -147,12 +148,6 @@ pub fn run() {
                     *slot = Some(err);
                     // Continue anyway so the window opens — the frontend will display the error.
                 }
-
-                if let Err(err) = tray::create_tray(&handle) {
-                    tracing::warn!("failed to create tray: {err}");
-                }
-
-                let _ = tray::update_tooltip(&handle, &state).await;
             });
 
             Ok(())

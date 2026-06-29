@@ -1,5 +1,5 @@
 /*
- * Process-wide mutable state shared between Tauri commands and tray updates.
+ * Process-wide mutable state shared across the Tauri GUI's command handlers.
  *
  * In the daemon-GUI split model the daemon owns all backup state (scheduler, in-progress
  * flag, active project, config persistence).  AppState is simplified: it retains only the
@@ -10,7 +10,6 @@
 
 use std::sync::atomic::AtomicBool;
 
-use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -25,8 +24,8 @@ use backr_core::host_trust::host_append_authorized_pubkey_impl;
 pub struct AppState {
     /// Loaded configuration from disk, or `None` before first successful save.
     ///
-    /// Retained for backward compatibility with `require_config()` and tray helpers that
-    /// read the schedule interval; the authoritative copy lives in the daemon.
+    /// Retained for backward compatibility with `require_config()`; the authoritative
+    /// copy lives in the daemon.
     pub config: Mutex<Option<Config>>,
 
     /// Set while an on-demand or scheduled backup worker is active.
@@ -36,13 +35,8 @@ pub struct AppState {
 
     /// Project directory name currently being synced (if any).
     ///
-    /// Retained for backward compatibility with residual tray update paths.
+    /// Retained for backward compatibility; the daemon owns the authoritative value.
     pub active_project: Mutex<Option<String>>,
-
-    /// Last successful backup instant mirrored from the daemon response.
-    ///
-    /// Retained for tray tooltip updates.
-    pub last_backup_at: Mutex<Option<DateTime<Utc>>>,
 
     /// Handle for the background scheduler task (daemon now owns the real scheduler;
     /// this field is kept to avoid breaking residual references in scheduler.rs).
@@ -92,7 +86,6 @@ impl Default for AppState {
             config: Mutex::new(None),
             in_progress: AtomicBool::new(false),
             active_project: Mutex::new(None),
-            last_backup_at: Mutex::new(None),
             scheduler_handle: Mutex::new(None),
             scheduler_cancel: Mutex::new(None),
             pairing: Mutex::new(None),

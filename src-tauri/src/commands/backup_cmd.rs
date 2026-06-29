@@ -104,7 +104,7 @@ pub async fn run_backup(
     spawn_backup_job(&app, state.inner(), project)
 }
 
-/// Runs one scheduled backup on the daemon (called by the tray scheduler tick).
+/// Runs one scheduled backup on the daemon (residual scheduler-wiring proxy).
 ///
 /// In daemon-GUI split mode the daemon owns its own scheduler; this function is kept for
 /// any residual Tauri-side scheduler wiring that has not yet been removed and simply
