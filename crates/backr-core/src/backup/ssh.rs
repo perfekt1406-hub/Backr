@@ -125,16 +125,28 @@ pub async fn ensure_remote_dir_exists(
 async fn command_output(mut cmd: Command) -> Result<std::process::Output, BackrError> {
     let out = cmd.output().await.map_err(BackrError::Io)?;
     if !out.status.success() {
-        // Log full detail at debug level for operator diagnostics — not surfaced to the UI.
         let stderr = String::from_utf8_lossy(&out.stderr);
+        // Keep the full transcript in the debug log for operators…
         tracing::debug!(
             "SSH command failed (status {:?}): {}",
             out.status.code(),
             stderr.trim()
         );
-        return Err(BackrError::Remote(
-            "SSH command failed — check host connectivity and SSH key trust".to_string(),
-        ));
+        // …and surface the most actionable line to the user. The failure reason
+        // ("Permission denied (publickey)", "Connection refused", "Host key
+        // verification failed", "Too many authentication failures", …) is exactly
+        // what they need to act on — hiding it turns every SSH problem into a blind
+        // guess. The "Permanently added … to the list of known hosts" line is noise
+        // from accept-new, not the error, so skip it.
+        let detail = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("Warning: Permanently added"))
+            .next_back()
+            .unwrap_or("no SSH error output");
+        return Err(BackrError::Remote(format!(
+            "SSH command failed — check host connectivity and SSH key trust ({detail})"
+        )));
     }
     Ok(out)
 }
@@ -410,8 +422,10 @@ pub fn ssh_rsh_string(
         "StrictHostKeyChecking=yes"
     };
     // Base command without ControlMaster options.
+    // IdentitiesOnly=yes: use only the dedicated -i key, never agent/default identities
+    // (see ssh_base_command_for_host) so a loaded ssh-agent can't exhaust MaxAuthTries.
     let base = format!(
-        "ssh -p {ssh_port} -i {key} -o {host_check} -o BatchMode=yes -o UserKnownHostsFile={kh}"
+        "ssh -p {ssh_port} -i {key} -o {host_check} -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile={kh}"
     );
 
     // Append ControlMaster options when the socket directory is available. If not, fall back
@@ -503,6 +517,12 @@ fn ssh_base_command_for_host(
     c.arg("-i").arg(ssh_key);
     c.arg("-o").arg("ConnectTimeout=15");
     c.arg("-o").arg("BatchMode=yes");
+    // Use ONLY the dedicated Backr key passed via -i, never the user's ssh-agent or
+    // default identities. Without this, OpenSSH offers agent/default keys first; the
+    // host's backup account rejects them and sshd's MaxAuthTries trips before the
+    // trusted Backr key is ever tried — "Permission denied (publickey)" despite a
+    // correct authorized_keys. This matches Backr's isolated-credential design.
+    c.arg("-o").arg("IdentitiesOnly=yes");
     if accept_new {
         c.arg("-o").arg("StrictHostKeyChecking=accept-new");
     } else {
@@ -654,5 +674,38 @@ mod tests {
         // Backup must use accept-new; restore must not.
         assert!(backup_rsh.contains("accept-new"), "backup rsh must use StrictHostKeyChecking=accept-new");
         assert!(!restore_rsh.contains("accept-new"), "restore rsh must not use StrictHostKeyChecking=accept-new");
+    }
+
+    /// Both SSH builders must pin `IdentitiesOnly=yes` so OpenSSH uses ONLY the dedicated
+    /// `-i` key and ignores the user's ssh-agent / default identities. Without it a loaded
+    /// agent offers other keys first and sshd's MaxAuthTries rejects the connection before
+    /// the trusted Backr key is tried — auth fails despite a correct authorized_keys.
+    #[test]
+    fn ssh_rsh_string_sets_identities_only() {
+        let known = PathBuf::from("/tmp/fake_known_hosts");
+        for accept_new in [true, false] {
+            let rsh =
+                ssh_rsh_string("/tmp/id_ed25519", &known, 22, "backup.example.com", accept_new);
+            assert!(
+                rsh.contains("IdentitiesOnly=yes"),
+                "rsh (accept_new={accept_new}) must contain IdentitiesOnly=yes: {rsh}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_base_command_sets_identities_only() {
+        let known = PathBuf::from("/tmp/fake_known_hosts");
+        let cmd =
+            ssh_base_command_for_host("/tmp/id_ed25519", &known, true, 22, "backup.example.com");
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|a| a == "IdentitiesOnly=yes"),
+            "ssh base command must pass -o IdentitiesOnly=yes: {args:?}"
+        );
     }
 }
