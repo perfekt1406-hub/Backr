@@ -1,0 +1,18 @@
+# backrd.service — systemd user service unit for the Backr daemon.
+# Installed to ~/.config/systemd/user/backrd.service by the Backr setup script.
+# Manages backrd as a persistent user-session service that starts at login.
+[Unit]
+Description=Backr daemon — backup scheduler and IPC server
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=BACKRD_BIN_PATH
+Restart=on-failure
+RestartSec=5
+# Give backrd time to flush in-progress rsync before killing it
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

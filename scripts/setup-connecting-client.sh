@@ -51,6 +51,9 @@ set -euo pipefail
 # BASH_SOURCE[0] may be unset and there is no checkout — resolve_repo_source()
 # then downloads the source and repoints REPO_ROOT.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd || true)"
+# Absolute path of the scripts/ directory — used to locate template files such as
+# backrd.service.template and backrd.plist.template when running from a local checkout.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 # Set to 1 when REPO_ROOT is a downloaded temp tree (curl mode) so it is cleaned up.
 SRC_IS_TEMP=0
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
@@ -825,6 +828,9 @@ install_app_build_and_integrate() {
   mkdir -p "$HOME/.cache/tauri"
   (cd "$REPO_ROOT" && npx tauri build --no-bundle)
   install_backr_app "$(find_built_native_binary_path)" "backr"
+  # Install the backrd daemon binary and register it as a user service so it
+  # runs persistently in the background from the first login after install.
+  install_backrd_daemon_service
 }
 
 #
@@ -845,6 +851,111 @@ find_built_appimage_path() {
   hit="$(find "$REPO_ROOT/src-tauri/target/release/bundle" -type f -name '*.AppImage' 2>/dev/null | head -n1 || true)"
   [[ -n "$hit" ]] || die "build produced no .AppImage under src-tauri/target/release/bundle — check tauri bundle targets"
   echo "$hit"
+}
+
+#
+# Copies the backrd daemon binary to ~/.local/bin/backrd and registers it as a
+# persistent user service so it starts at every login.
+#
+# On Linux: installs a systemd user service unit from backrd.service.template,
+#   substituting the binary path, then enables and starts the service.
+#   Skipped gracefully when systemctl is not available (non-systemd Linux).
+# On macOS: installs a launchd user agent plist from backrd.plist.template,
+#   substituting the binary and log paths, then loads the agent.
+#
+# Inputs:  REPO_ROOT (workspace with Cargo artifacts), SCRIPT_DIR (scripts/ dir).
+# Outputs: installs and starts backrd as a user-session daemon.
+#
+install_backrd_daemon_service() {
+  local backrd_src="$REPO_ROOT/src-tauri/target/release/backrd"
+  if [[ ! -f "$backrd_src" ]]; then
+    echo "warning: backrd binary not found at ${backrd_src} — skipping daemon service install." >&2
+    return 0
+  fi
+
+  # Install the backrd binary to ~/.local/bin so the service unit can reference
+  # a stable path that does not change when the source tree is cleaned.
+  local local_bin="$HOME/.local/bin"
+  mkdir -p "$local_bin"
+  local backrd_bin="$local_bin/backrd"
+  cp -f "$backrd_src" "$backrd_bin"
+  chmod u+x "$backrd_bin"
+  echo "Installed backrd daemon: ${backrd_bin}"
+
+  if [[ "$OSTYPE" == darwin* ]]; then
+    # macOS — install as a launchd user agent.
+    local plist_template="${SCRIPT_DIR}/backrd.plist.template"
+    if [[ ! -f "$plist_template" ]]; then
+      echo "warning: ${plist_template} not found — skipping launchd agent install." >&2
+      return 0
+    fi
+    local log_dir="$HOME/Library/Logs/backr"
+    mkdir -p "$log_dir"
+    local agents_dir="$HOME/Library/LaunchAgents"
+    mkdir -p "$agents_dir"
+    local plist_dest="${agents_dir}/com.backr.daemon.plist"
+    # Replace both placeholders: binary path and log directory.
+    sed \
+      -e "s|BACKRD_BIN_PATH|${backrd_bin}|g" \
+      -e "s|BACKR_LOG_DIR|${log_dir}|g" \
+      "$plist_template" > "$plist_dest"
+    # Unload any previous instance before loading the updated plist.
+    launchctl unload "$plist_dest" 2>/dev/null || true
+    launchctl load -w "$plist_dest"
+    echo "Registered backrd launchd agent: ${plist_dest}"
+    return 0
+  fi
+
+  # Linux — install as a systemd user service when systemctl is available.
+  if ! command -v systemctl &>/dev/null; then
+    echo "note: systemctl not found — skipping backrd systemd service install." >&2
+    return 0
+  fi
+  local service_template="${SCRIPT_DIR}/backrd.service.template"
+  if [[ ! -f "$service_template" ]]; then
+    echo "warning: ${service_template} not found — skipping systemd service install." >&2
+    return 0
+  fi
+  local service_dir="$HOME/.config/systemd/user"
+  mkdir -p "$service_dir"
+  local service_dest="${service_dir}/backrd.service"
+  # Replace the binary-path placeholder with the installed path.
+  sed "s|BACKRD_BIN_PATH|${backrd_bin}|g" "$service_template" > "$service_dest"
+  systemctl --user daemon-reload
+  systemctl --user enable backrd.service
+  systemctl --user start backrd.service
+  echo "Registered and started backrd systemd user service."
+}
+
+#
+# Stops and removes the backrd daemon service (systemd or launchd) and deletes
+# the installed binary from ~/.local/bin/backrd.
+# Called by uninstall_backr() so the daemon is cleaned up alongside the app.
+#
+# Inputs:  none (uses fixed install paths).
+# Outputs: removes the service unit/plist and the daemon binary.
+#
+remove_backrd_daemon_service() {
+  if [[ "$OSTYPE" == darwin* ]]; then
+    local plist_dest="$HOME/Library/LaunchAgents/com.backr.daemon.plist"
+    if [[ -f "$plist_dest" ]]; then
+      launchctl unload "$plist_dest" 2>/dev/null || true
+      rm -f "$plist_dest"
+      echo "Removed backrd launchd agent."
+    fi
+  elif command -v systemctl &>/dev/null; then
+    # Stop and disable before removing the unit file.
+    systemctl --user stop backrd.service 2>/dev/null || true
+    systemctl --user disable backrd.service 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/backrd.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo "Removed backrd systemd user service."
+  fi
+  # Remove the daemon binary regardless of service type.
+  if [[ -f "$HOME/.local/bin/backrd" ]]; then
+    rm -f "$HOME/.local/bin/backrd"
+    echo "Removed backrd binary (${HOME}/.local/bin/backrd)."
+  fi
 }
 
 #
@@ -1053,6 +1164,8 @@ uninstall_backr() {
   if command -v gtk-update-icon-cache &>/dev/null; then
     gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" &>/dev/null || true
   fi
+  # Stop and remove the backrd daemon service (best-effort; non-fatal if absent).
+  remove_backrd_daemon_service
   echo "Backr app removed (binary, launcher entry, icons)."
   echo "Left untouched: your config (~/.config/backr), SSH keys, toolchain (Node/Rust/system packages)."
   echo "To also clear pairing config: rm -rf \"\${XDG_CONFIG_HOME:-\$HOME/.config}/backr\""
