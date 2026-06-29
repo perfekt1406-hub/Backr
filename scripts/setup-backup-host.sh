@@ -1076,7 +1076,7 @@ install_host_desktop_entry() {
   local backend
   backend="$(detect_pkg_backend)"
   if [[ "$backend" == "pacman" ]]; then
-    dest="${dest_dir}/backr"
+    dest="${dest_dir}/backr-app"
   else
     dest="${dest_dir}/Backr.AppImage"
   fi
@@ -1448,8 +1448,11 @@ launch_host_dashboard_app() {
   target_user="$(detect_desktop_user 2>/dev/null)" || return 0
   target_home="$(getent passwd "$target_user" | cut -d: -f6)"
   target_uid="$(id -u "$target_user" 2>/dev/null)" || return 0
-  # Check for native binary first (Arch), then AppImage.
-  dest="${target_home}/.local/share/backr/backr"
+  # Check for the native binary first (backr-app, then legacy backr), then AppImage.
+  dest="${target_home}/.local/share/backr/backr-app"
+  if [[ ! -f "$dest" ]]; then
+    dest="${target_home}/.local/share/backr/backr"
+  fi
   if [[ ! -f "$dest" ]]; then
     dest="${target_home}/.local/share/backr/Backr.AppImage"
   fi
@@ -1518,6 +1521,8 @@ launch_host_dashboard_app() {
   # version and the update would appear not to take effect.  Best-effort: this
   # script runs as root, so the signal reaches the desktop user's process.
   if command -v pkill &>/dev/null; then
+    # "backr-app" is the current GUI process name; "backr" matches legacy installs.
+    pkill -x backr-app 2>/dev/null || true
     pkill -x backr 2>/dev/null || true
     sleep 1   # let it release the single-instance lock before relaunching
   fi
