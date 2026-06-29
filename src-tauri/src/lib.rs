@@ -1,21 +1,29 @@
 /*
  * Library entry: wires configuration loading, tray installation, scheduler startup, and commands.
  * Exposes [`run()`] consumed by the small `main.rs` binary wrapper.
+ *
+ * Business-logic modules now live in `backr_core` (the `crates/backr-core` crate).
+ * Only Tauri-coupled modules remain here: commands, state, tray, and the Tauri-specific
+ * parts of the progress sink and scheduler wiring.
  */
 
-pub mod backup;
 pub mod commands;
-pub mod config;
-pub mod error;
-pub mod host_config;
-pub mod host_disk_inventory;
-pub mod host_trust;
-pub mod pairing;
 pub mod progress_sink;
-pub mod project_snapshot_cache;
 pub mod scheduler;
 pub mod state;
 pub mod tray;
+
+// Re-export backr_core modules so existing command code can use short paths where needed.
+// (Commands currently still use `crate::config`, `crate::backup`, etc. via re-exports.)
+pub use backr_core::backup;
+pub use backr_core::config;
+pub use backr_core::error;
+pub use backr_core::host_config;
+pub use backr_core::host_disk_inventory;
+pub use backr_core::host_trust;
+pub use backr_core::pairing;
+pub use backr_core::progress_sink as progress_sink_core;
+pub use backr_core::project_snapshot_cache;
 
 use std::sync::Arc;
 

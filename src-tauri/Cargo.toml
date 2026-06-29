@@ -1,3 +1,7 @@
+# Tauri application crate — the desktop GUI binary for Backr.
+# Tauri-specific dependencies are kept explicit here (not in workspace.dependencies)
+# because they are not shared with other crates in the workspace.
+
 [package]
 name = "backr"
 version = "0.1.0"
@@ -15,28 +19,34 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.1", features = [] }
 
 [dependencies]
-tauri = { version = "2.11.1", features = ["tray-icon", "image-png"] }
+# --- Core logic crate (non-Tauri business logic) ---
+backr-core = { path = "../crates/backr-core" }
+
+# --- Tauri-specific (not shared via workspace) ---
+tauri                      = { version = "2.11.1", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2.4"
-tauri-plugin-notification = "2.3"
-tauri-plugin-shell = "2.3"
-tauri-plugin-dialog = "2.7"
-tokio = { version = "1.52", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.8"
-chrono = { version = "0.4", features = ["serde"] }
-thiserror = "2.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-regex = "1.11"
-once_cell = "1.21"
-dirs = "6.0"
-shell-escape = "0.1.5"
-shellexpand = "3.1"
-rand = "0.9.4"
-tiny_http = "0.12.0"
-mdns-sd = "0.20.0"
+tauri-plugin-notification  = "2.3"
+tauri-plugin-shell         = "2.3"
+tauri-plugin-dialog        = "2.7"
+
+# --- Shared workspace deps ---
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+toml               = { workspace = true }
+chrono             = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+regex              = { workspace = true }
+once_cell          = { workspace = true }
+dirs               = { workspace = true }
+shell-escape       = { workspace = true }
+shellexpand        = { workspace = true }
+rand               = { workspace = true }
+tiny_http          = { workspace = true }
+mdns-sd            = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk-nvidia-quirk = "1.3"

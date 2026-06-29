@@ -1,0 +1,28 @@
+# backrd — Backr system daemon binary crate.
+# Runs as a background process managing the backup scheduler, Unix socket IPC server,
+# and system tray integration. Has no dependency on Tauri; the Tauri GUI connects
+# to it over the Unix socket defined in crates/backrd/src/ipc/.
+
+[package]
+name = "backrd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Backr system daemon — scheduler, IPC server, and tray."
+
+[[bin]]
+name = "backrd"
+path = "src/main.rs"
+
+[dependencies]
+backr-core = { path = "../backr-core" }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+chrono      = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs        = { workspace = true }
+tiny_http   = { workspace = true }
+uuid        = { version = "1", features = ["v4"] }

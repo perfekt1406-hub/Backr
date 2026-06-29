@@ -17,6 +17,8 @@
     devShellToggleEnabled,
     getDevShellKindPreference,
   } from "./lib/devShellPreference";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+
   import { getConfig, resolveShellBootstrap } from "./lib/commands";
   import { registerMockProgressAppender } from "./lib/mockProgressSink";
   import routes from "./routes";
@@ -62,6 +64,7 @@
 
     let unlistenBackup: (() => void) | undefined;
     let removeHashListener: (() => void) | undefined;
+    let unlistenFocus: (() => void) | undefined;
 
     void (async () => {
       try {
@@ -96,6 +99,35 @@
 
         unlistenBackup = await listenBackupProgress((line) => appendProgressLine(line));
 
+        // Re-evaluate bootstrap whenever the window is focused after being hidden
+        // (e.g. config deleted while app was hidden in tray — next show picks up new state).
+        unlistenFocus = await getCurrentWindow().onFocusChanged(async ({ payload: focused }) => {
+          if (!focused) return;
+          try {
+            const fresh = await resolveShellBootstrap();
+            if (fresh.mode === get(shellKind)) return;
+            if (fresh.mode === "host") {
+              shellKind.set("host");
+              hostDashboardRoot.set(fresh.backup_root);
+              hostSshUser.set(fresh.ssh_user ?? null);
+              routeForBootstrap("host", false);
+            } else if (fresh.mode === "setup") {
+              shellKind.set("setup");
+              hostDashboardRoot.set(null);
+              hostSshUser.set(null);
+              routeForBootstrap("setup", false);
+            } else {
+              shellKind.set("client");
+              hostDashboardRoot.set(null);
+              hostSshUser.set(null);
+              const cfg = await getConfig();
+              routeForBootstrap("client", cfg != null);
+            }
+          } catch {
+            // Ignore re-check errors — stale mode is better than a crash on focus
+          }
+        });
+
         const onHash = (): void => {
           const mode = get(shellKind);
           if (mode === "host") {
@@ -114,6 +146,7 @@
     })();
 
     return () => {
+      unlistenFocus?.();
       unlistenBackup?.();
       removeHashListener?.();
     };
