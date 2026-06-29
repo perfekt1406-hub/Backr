@@ -1395,10 +1395,16 @@ install_backrd_daemon_service_for_user() {
     echo "Installed backr CLI: ${local_bin}/backr"
   fi
 
-  # Locate the service unit template; it lives alongside this script.
-  local service_template="${SCRIPT_DIR}/backrd.service.template"
+  # Locate the service unit template.  It lives in the source tree's scripts/
+  # dir — derive that from backrd_src (<src>/target/release/backrd -> <src>),
+  # which is correct in curl mode where the source was downloaded to a temp dir.
+  # Fall back to SCRIPT_DIR for local-checkout runs.
+  local src_root
+  src_root="$(dirname "$(dirname "$(dirname "$backrd_src")")")"
+  local service_template="${src_root}/scripts/backrd.service.template"
+  [[ -f "$service_template" ]] || service_template="${SCRIPT_DIR}/backrd.service.template"
   if [[ ! -f "$service_template" ]]; then
-    echo "warning: ${service_template} not found — skipping systemd service install." >&2
+    echo "warning: backrd.service.template not found — skipping systemd service install." >&2
     return 0
   fi
 

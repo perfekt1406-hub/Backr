@@ -51,9 +51,6 @@ set -euo pipefail
 # BASH_SOURCE[0] may be unset and there is no checkout — resolve_repo_source()
 # then downloads the source and repoints REPO_ROOT.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd || true)"
-# Absolute path of the scripts/ directory — used to locate template files such as
-# backrd.service.template and backrd.plist.template when running from a local checkout.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 # Set to 1 when REPO_ROOT is a downloaded temp tree (curl mode) so it is cleaned up.
 SRC_IS_TEMP=0
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
@@ -881,7 +878,7 @@ find_built_appimage_path() {
 # On macOS: installs a launchd user agent plist from backrd.plist.template,
 #   substituting the binary and log paths, then loads the agent.
 #
-# Inputs:  REPO_ROOT (workspace with Cargo artifacts), SCRIPT_DIR (scripts/ dir).
+# Inputs:  REPO_ROOT (source tree with Cargo artifacts + scripts/ templates).
 # Outputs: installs and starts backrd as a user-session daemon.
 #
 install_backrd_daemon_service() {
@@ -902,7 +899,10 @@ install_backrd_daemon_service() {
 
   if [[ "$OSTYPE" == darwin* ]]; then
     # macOS — install as a launchd user agent.
-    local plist_template="${SCRIPT_DIR}/backrd.plist.template"
+    # Templates live in the source tree (REPO_ROOT), which resolve_repo_source
+    # repoints to the downloaded tarball in curl mode — unlike SCRIPT_DIR, which
+    # in curl mode is just the lone downloaded script with no templates beside it.
+    local plist_template="${REPO_ROOT}/scripts/backrd.plist.template"
     if [[ ! -f "$plist_template" ]]; then
       echo "warning: ${plist_template} not found — skipping launchd agent install." >&2
       return 0
@@ -929,7 +929,8 @@ install_backrd_daemon_service() {
     echo "note: systemctl not found — skipping backrd systemd service install." >&2
     return 0
   fi
-  local service_template="${SCRIPT_DIR}/backrd.service.template"
+  # From the source tree (REPO_ROOT), not SCRIPT_DIR — see plist note above.
+  local service_template="${REPO_ROOT}/scripts/backrd.service.template"
   if [[ ! -f "$service_template" ]]; then
     echo "warning: ${service_template} not found — skipping systemd service install." >&2
     return 0
