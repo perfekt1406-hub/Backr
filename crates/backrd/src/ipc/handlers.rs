@@ -208,15 +208,21 @@ async fn handle_ping(_params: Value, _state: Arc<DaemonState>) -> Result<Value, 
 // Backup domain
 // ---------------------------------------------------------------------------
 
-/// Triggers an async backup job (fire-and-forget). Returns immediately after scheduling.
+/// Runs a backup inline and returns when it completes (success or error).
 ///
-/// Guards with an `AtomicBool` compare-exchange to reject concurrent runs.
-/// Progress lines are broadcast via `IpcBroadcastSink`.
+/// Runs inline rather than fire-and-forget so the request's open IPC connection
+/// streams each progress event to the GUI (`send_with_progress` re-emits them as
+/// `backup://progress`). A spawned task would let the connection close on the
+/// immediate ack — before any progress is produced — leaving the GUI's rsync
+/// console empty. This mirrors the restore handlers.
+///
+/// Guards with an `AtomicBool` compare-exchange to reject concurrent runs, and
+/// clears the in-progress flag on every exit path.
 ///
 /// # Parameters
-/// - `params`   — `{ "project": "<name>" }` (optional).
+/// - `params`   — `{ "project": "<name>" }` (optional; all projects when omitted).
 /// - `state`    — checked for `in_progress`; config read; `last_backup_at` updated.
-/// - `event_tx` — broadcast sender used inside the spawned task for progress events.
+/// - `event_tx` — broadcast sender for progress events forwarded to connected GUIs.
 async fn handle_run_backup(
     params: Value,
     state: Arc<DaemonState>,
@@ -242,34 +248,26 @@ async fn handle_run_backup(
         return Err(cmd_err(BackrCommandError::backup_in_progress()));
     }
 
-    let state2 = Arc::clone(&state);
-    let tx = event_tx.clone();
-    tokio::spawn(async move {
-        // Ensure in_progress is cleared when the task exits, even on error.
-        struct InProgressDrop(Arc<DaemonState>);
-        impl Drop for InProgressDrop {
-            fn drop(&mut self) {
-                self.0.in_progress.store(false, Ordering::SeqCst);
-            }
+    // Clear the in-progress flag on every exit path, including an early return or a
+    // panic while awaiting the backup below.
+    struct InProgressDrop(Arc<DaemonState>);
+    impl Drop for InProgressDrop {
+        fn drop(&mut self) {
+            self.0.in_progress.store(false, Ordering::SeqCst);
         }
-        let _clear = InProgressDrop(Arc::clone(&state2));
+    }
+    let _clear = InProgressDrop(Arc::clone(&state));
 
-        let sink: SharedProgress = Arc::new(IpcBroadcastSink::new(tx.clone()));
-        let res = execute_backup_cycle_with_sink(sink, &state2, project).await;
-        if let Err(err) = res {
-            let _ = tx.send(IpcEvent {
-                event: "backup_progress".into(),
-                data: serde_json::json!(format!("[backr] error: {err}")),
-            });
-        }
-        drop(_clear);
-        {
-            let mut ap = state2.active_project.lock().await;
-            *ap = None;
-        }
-    });
-
-    Ok(serde_json::json!(null))
+    // Run the backup inline so progress streams over this open connection (see the
+    // function doc). On failure the error is returned as the IPC response rather
+    // than broadcast, so the GUI surfaces it on the awaiting call.
+    let sink: SharedProgress = Arc::new(IpcBroadcastSink::new(event_tx));
+    let res = execute_backup_cycle_with_sink(sink, &state, project).await;
+    {
+        let mut ap = state.active_project.lock().await;
+        *ap = None;
+    }
+    res.map(|()| serde_json::json!(null)).map_err(core_err)
 }
 
 /// Runs the full backup pipeline for one optional project (or all projects).
