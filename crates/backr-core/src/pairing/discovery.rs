@@ -10,12 +10,12 @@ use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::pairing::PAIRING_SERVICE_TYPE;
 
 /// A host found on the LAN that is currently in pairing mode.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredHost {
     /// Friendly hostname for display.
     pub hostname: String,

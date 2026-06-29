@@ -6,8 +6,12 @@
  * code against the active PairingSession, trusts the laptop's public key through
  * the same path as the Trust-keys UI, and returns this host's connection details
  * so the laptop can prefill its setup. The start/stop lifecycle and mDNS
- * advertisement live in `commands/pairing_cmd.rs`; this module holds the
- * request logic and the blocking serve loop.
+ * advertisement live in the Tauri app's `commands/pairing_cmd.rs`; this module
+ * holds the request logic and the blocking serve loop.
+ *
+ * `AppState` coupling is removed: the `serve` function accepts a `PairingStateAccess`
+ * trait object so this module can live in `backr-core` without depending on Tauri.
+ * The Tauri app implements `PairingStateAccess` for its `AppState`.
  */
 
 use std::process::Command;
@@ -17,11 +21,9 @@ use serde::{Deserialize, Serialize};
 use tiny_http::{Method, Response, Server};
 
 use crate::host_config::read_host_dashboard_marker;
-use crate::host_trust::{
-    host_append_authorized_pubkey_impl, normalize_pubkey_line, validate_pubkey_line,
-};
+use crate::host_trust::{normalize_pubkey_line, validate_pubkey_line};
 use crate::pairing::code::{CodeValidation, PairingSession};
-use crate::state::AppState;
+use crate::pairing::PairingRuntime;
 
 /// What a laptop POSTs to `/pair`.
 #[derive(Debug, Deserialize)]
@@ -52,6 +54,46 @@ pub enum PairRejection {
     BadCode(CodeValidation),
     BadPubkey(String),
     AppendFailed(String),
+}
+
+/// Abstraction over the pairing session and runtime state that the serve loop needs.
+///
+/// The Tauri app implements this for `AppState`; alternative runtimes (daemon, CLI)
+/// can provide their own implementations without depending on Tauri.
+///
+/// All methods use blocking synchronisation (no async) because `serve` runs on a
+/// dedicated OS thread outside the Tokio executor.
+pub trait PairingStateAccess: Send + Sync {
+    /// Validates the pending pair request against the active session.
+    ///
+    /// Acquires a blocking lock on the session slot, calls `process_pair` with the
+    /// session (if present), and returns its result.
+    ///
+    /// # Inputs
+    ///
+    /// * `req`    — the pair request to validate.
+    /// * `host`   — host info to return on success.
+    /// * `append` — closure that appends the validated pubkey to authorized_keys.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(HostPairInfo)` on success, `Err(Some(rej))` on rejection, `Err(None)`
+    /// when there is no active session.
+    fn process_pair_request(
+        &self,
+        req: &PairRequest,
+        host: &HostPairInfo,
+    ) -> Result<HostPairInfo, Option<PairRejection>>;
+
+    /// Clears the active pairing session slot (sets it to `None`).
+    fn clear_pairing_session(&self);
+
+    /// Takes the active `PairingRuntime` out of its slot (sets it to `None`) and returns it.
+    ///
+    /// # Returns
+    ///
+    /// `Some(PairingRuntime)` if a window was open, `None` if already torn down.
+    fn take_pairing_runtime(&self) -> Option<PairingRuntime>;
 }
 
 /// Pure pairing decision: validate the public key, consume the code, trust the key,
@@ -141,13 +183,19 @@ fn json_header() -> tiny_http::Header {
 }
 
 /// Blocking serve loop for the pairing window. Runs on a dedicated OS thread (never a
-/// Tokio worker — it uses `blocking_lock`). Returns after one successful pair; the
-/// caller also tears it down on explicit cancel by calling `PairingRuntime::shutdown`,
-/// which unblocks `incoming_requests` via `Server::unblock`.
-pub fn serve(server: Arc<Server>, state: Arc<AppState>, host: HostPairInfo) {
+/// Tokio worker — it uses blocking locks via `PairingStateAccess`). Returns after one
+/// successful pair; the caller also tears it down on explicit cancel by calling
+/// `PairingRuntime::shutdown`, which unblocks `incoming_requests` via `Server::unblock`.
+///
+/// # Inputs
+///
+/// * `server` — the HTTP server to serve requests from.
+/// * `state`  — trait object providing access to the pairing session and runtime slots.
+/// * `host`   — pre-gathered host info returned to the laptop on success.
+pub fn serve(server: Arc<Server>, state: Arc<dyn PairingStateAccess>, host: HostPairInfo) {
     let mut paired = false;
     for request in server.incoming_requests() {
-        if handle_request(request, &state, &host) {
+        if handle_request(request, &*state, &host) {
             paired = true;
             break;
         }
@@ -156,18 +204,19 @@ pub fn serve(server: Arc<Server>, state: Arc<AppState>, host: HostPairInfo) {
         // A successful pair closes the window immediately: remove the runtime
         // (without joining our own thread) and stop advertising. A later
         // stop_pairing call then finds nothing to tear down and no-ops.
-        let runtime = state.pairing_runtime.blocking_lock().take();
+        let runtime = state.take_pairing_runtime();
         if let Some(rt) = runtime {
             let _ = rt.mdns.unregister(&rt.fullname);
             let _ = rt.mdns.shutdown();
             // rt.server + rt.thread (our own handle) drop here, detaching this thread.
         }
-        *state.pairing.blocking_lock() = None;
+        // Clear the active pairing session.
+        state.clear_pairing_session();
     }
 }
 
 /// Handles one request; returns true when a successful pair occurred (ends the window).
-fn handle_request(mut request: tiny_http::Request, state: &AppState, host: &HostPairInfo) -> bool {
+fn handle_request(mut request: tiny_http::Request, state: &dyn PairingStateAccess, host: &HostPairInfo) -> bool {
     if request.method() != &Method::Post || request.url() != "/pair" {
         let _ = request.respond(Response::from_string("not found").with_status_code(404));
         return false;
@@ -185,24 +234,8 @@ fn handle_request(mut request: tiny_http::Request, state: &AppState, host: &Host
         }
     };
 
-    // Sync thread → blocking_lock on the Tokio mutex holding the active session.
-    let mut guard = state.pairing.blocking_lock();
-    let Some(session) = guard.as_mut() else {
-        let _ = request.respond(Response::from_string("no active pairing").with_status_code(409));
-        return false;
-    };
-    let result = process_pair(session, &req, host, |line| {
-        let r = host_append_authorized_pubkey_impl(line.to_string())
-            .map_err(|e| e)?;
-        // appended=false + skipped_duplicate=false means the host process doesn't own
-        // authorized_keys — the sudo fallback path returned Ok but wrote nothing.
-        if r.appended || r.skipped_duplicate {
-            Ok(())
-        } else {
-            Err("host cannot write authorized_keys — run the sudo snippet from the Trust keys UI".to_string())
-        }
-    });
-    drop(guard);
+    // Delegate session validation to the trait implementation (handles locking).
+    let result = state.process_pair_request(&req, host);
 
     match result {
         Ok(info) => {
@@ -214,13 +247,17 @@ fn handle_request(mut request: tiny_http::Request, state: &AppState, host: &Host
             );
             true
         }
-        Err(rej) => {
+        Err(Some(rej)) => {
             let (status, msg) = match rej {
                 PairRejection::BadCode(_) => (403, "invalid or expired code"),
                 PairRejection::BadPubkey(_) => (400, "invalid public key"),
                 PairRejection::AppendFailed(_) => (500, "could not trust key"),
             };
             let _ = request.respond(Response::from_string(msg).with_status_code(status));
+            false
+        }
+        Err(None) => {
+            let _ = request.respond(Response::from_string("no active pairing").with_status_code(409));
             false
         }
     }

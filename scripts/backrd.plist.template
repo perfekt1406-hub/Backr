@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  backrd.plist — launchd user agent for the Backr daemon (macOS).
+  Installed to ~/Library/LaunchAgents/com.backr.daemon.plist by the Backr setup script.
+  Manages backrd as a persistent login-session agent that starts at login.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.backr.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>BACKRD_BIN_PATH</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>BACKR_LOG_DIR/backrd.log</string>
+    <key>StandardErrorPath</key>
+    <string>BACKR_LOG_DIR/backrd.err</string>
+</dict>
+</plist>

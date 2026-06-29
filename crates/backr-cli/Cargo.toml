@@ -1,0 +1,25 @@
+# backr-cli — Cargo manifest for the `backr` CLI binary.
+#
+# Provides the `backr` command-line tool that connects to a running `backrd` daemon
+# over its Unix domain socket and dispatches JSON IPC commands.  Has no dependency
+# on Tauri; works from any terminal or shell script.
+
+[package]
+name = "backr-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Backr CLI — talks to the backrd daemon over Unix socket."
+
+[[bin]]
+name = "backr"
+path = "src/main.rs"
+
+[dependencies]
+backr-core = { path = "../backr-core" }
+tokio      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+dirs       = { workspace = true }
+anyhow     = { workspace = true }
+clap       = { workspace = true }
