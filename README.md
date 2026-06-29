@@ -13,11 +13,10 @@ Desktop app that backs up your projects folder to a remote machine over SSH — 
 
 ### 1. Backup host (NAS / server / spare PC)
 
-Download and run the host setup script as root:
+Run the host setup script as root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh -o setup-backup-host.sh
-sudo bash setup-backup-host.sh
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash
 ```
 
 Installs OpenSSH + rsync, creates the `backr` account and `/srv/backr`, configures sshd, and opens the Backr host dashboard. To connect a laptop, click **Trust keys → Add a laptop** — it shows a 6-digit pairing code.
@@ -31,23 +30,30 @@ Installs OpenSSH + rsync, creates the `backr` account and `/srv/backr`, configur
 | `--verbose` | Print OS/firewall/sshd diagnostics after setup. |
 | `--dry-run` | Print actions without executing them. |
 
+To pass flags through the pipe, add `-s --` after `bash` (without it, `bash` treats the flag as its own option):
+
 ```bash
-sudo bash setup-backup-host.sh --remove-old-files
-sudo bash setup-backup-host.sh --no-appimage --verbose
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash -s -- --remove-old-files
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash -s -- --no-appimage --verbose
 ```
 
 ---
 
 ### 2. Laptop
 
-Download and run the client setup script as your **normal user** (not `sudo`) — it elevates per-command for package installs:
+Run the client setup script as your **normal user** (not `sudo`) — it elevates per-command for package installs:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-connecting-client.sh -o setup-connecting-client.sh
-bash setup-connecting-client.sh
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-connecting-client.sh | bash
 ```
 
 Downloads the source, installs all build deps (Node, Rust, Tauri libs), builds a **native binary** (`tauri build --no-bundle`), and adds it to your app menu. Works on Debian/Ubuntu, Fedora, Arch-based, openSUSE, and Alpine.
+
+To pass flags through the pipe, add `-s --` after `bash` (without it, `bash` treats the flag as its own option):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-connecting-client.sh | bash -s -- --deps-only
+```
 
 Prefer a checkout?
 
