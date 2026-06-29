@@ -36,9 +36,6 @@ struct PairReply {
     /// SHA256 fingerprint string (e.g. `SHA256:abc...`) for user verification.
     #[serde(default)]
     host_key_fingerprint: String,
-    /// Resolvable mDNS hostname (e.g. `archlinux.local`); empty on older hosts.
-    #[serde(default)]
-    hostname: String,
 }
 
 /// Intermediate result of a successful pair POST: the prefilled config draft and the
@@ -56,23 +53,6 @@ pub struct PairDraft {
     pub host_pubkey: String,
     /// The resolved SSH target (IP or mDNS name) the client will connect to.
     pub ssh_target: String,
-}
-
-/// Returns true when `host` resolves to at least one address (mDNS/DNS/hosts).
-///
-/// # Inputs
-///
-/// * `host` — bare hostname (no port).
-/// * `port` — any port; only used to form a socket-addr query for `getaddrinfo`.
-///
-/// Used at pairing time to decide whether the host's `.local` name is usable on this
-/// network before we commit to storing it as the SSH target.
-fn hostname_resolves(host: &str, port: u16) -> bool {
-    use std::net::ToSocketAddrs;
-    (host, port)
-        .to_socket_addrs()
-        .map(|mut addrs| addrs.next().is_some())
-        .unwrap_or(false)
 }
 
 /// Pairs with a discovered host at `address` ("ip:port") using `code`: ensures a local
@@ -104,17 +84,14 @@ pub fn pair_with_host(address: &str, code: &str) -> Result<PairDraft, String> {
     let reply: PairReply =
         serde_json::from_str(&resp_body).map_err(|e| format!("bad pair reply: {e}"))?;
 
-    let host_ip = address.split(':').next().unwrap_or(address).to_string();
-
-    // Prefer the host's mDNS name so backups follow it across DHCP IP changes, but only
-    // when it actually resolves on this network (avahi/nss-mdns present). Otherwise fall
-    // back to the paired IP — correct today, even if it goes stale on the next reboot.
-    let hostname = reply.hostname.trim();
-    let ssh_target = if !hostname.is_empty() && hostname_resolves(hostname, reply.ssh_port) {
-        hostname.to_string()
-    } else {
-        host_ip
-    };
+    // Use the IP the pairing request actually reached. The host advertises its
+    // `<hostname>.local` mDNS name ONLY while in pairing mode, so a "resolves now" check
+    // is a false positive: the name resolves during pairing (the host's mDNS responder
+    // is up and answering) but stops resolving once pairing ends — which then fails every
+    // backup with "Could not resolve hostname ….local". The paired IP is verified
+    // reachable (we just POSTed to it) and stable on this LAN; if it changes via DHCP,
+    // re-pair or edit the host under Settings.
+    let ssh_target = address.split(':').next().unwrap_or(address).to_string();
 
     // Build the config draft but do NOT pin the known_host or save yet — the user must
     // first verify the fingerprint shown here matches what is displayed on the host screen.
