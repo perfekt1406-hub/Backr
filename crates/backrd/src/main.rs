@@ -139,8 +139,9 @@ async fn main() {
                 // independently; this subscribe() call must happen before spawning
                 // so events emitted between accept() and task start are not lost.
                 let event_rx = event_tx.subscribe();
+                let tx = event_tx.clone();
                 tokio::spawn(async move {
-                    ipc::handle_connection(stream, state, event_rx).await;
+                    ipc::handle_connection(stream, state, tx, event_rx).await;
                 });
             }
             Err(e) => {

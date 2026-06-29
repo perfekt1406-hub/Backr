@@ -16,6 +16,10 @@
  * Using a single MPSC write channel means the socket write half never needs to be
  * shared or locked — only the writer task touches it.
  *
+ * The `event_tx` broadcast sender is threaded through to `handlers::dispatch` so that
+ * handlers like `run_backup` and `restore_*` can construct an `IpcBroadcastSink` to
+ * stream progress events to all connected GUI clients.
+ *
  * Protocol summary (one JSON object per `\n`-terminated line):
  *   Client → Daemon : {"id": "<uuid>", "method": "<name>", "params": {…}}
  *   Daemon → Client : {"id": "<uuid>", "result": {…}}      (success)
@@ -47,11 +51,14 @@ use crate::ipc::protocol::{IpcError, IpcEvent, IpcRequest, IpcResponse};
 /// # Parameters
 /// - `stream`   — The accepted Unix domain socket stream.
 /// - `state`    — Shared daemon state passed into each handler.
+/// - `event_tx` — Broadcast sender; handlers that produce progress events (backup,
+///                restore) clone this to construct an `IpcBroadcastSink`.
 /// - `event_rx` — Subscription to the daemon-wide `IpcEvent` broadcast channel;
 ///                events received here are forwarded to this connection's socket.
 pub async fn handle_connection(
     stream: UnixStream,
     state: Arc<DaemonState>,
+    event_tx: broadcast::Sender<IpcEvent>,
     event_rx: broadcast::Receiver<IpcEvent>,
 ) {
     // Split the stream so the reader and writer can operate concurrently.
@@ -69,7 +76,7 @@ pub async fn handle_connection(
     let forwarder_handle = tokio::spawn(run_event_forwarder(event_rx, fwd_tx));
 
     // Run the request read-dispatch loop on the current task.
-    run_request_loop(read_half, state, write_tx).await;
+    run_request_loop(read_half, state, event_tx, write_tx).await;
 
     // When the reader loop exits (client EOF or error), abort the helpers.
     forwarder_handle.abort();
@@ -91,10 +98,12 @@ pub async fn handle_connection(
 /// # Parameters
 /// - `read_half` — Owned read half of the Unix socket.
 /// - `state`     — Shared daemon state.
+/// - `event_tx`  — Broadcast sender passed to handlers that emit progress events.
 /// - `write_tx`  — MPSC sender to the socket writer task.
 async fn run_request_loop(
     read_half: tokio::net::unix::OwnedReadHalf,
     state: Arc<DaemonState>,
+    event_tx: broadcast::Sender<IpcEvent>,
     write_tx: mpsc::UnboundedSender<String>,
 ) {
     let mut reader = BufReader::new(read_half);
@@ -137,12 +146,18 @@ async fn run_request_loop(
 
         debug!("ipc: {} → method={}", request.id, request.method);
 
-        // Dispatch to the appropriate handler.
-        let response =
-            match handlers::dispatch(&request.method, request.params, Arc::clone(&state)).await {
-                Ok(result) => IpcResponse::ok(&request.id, result),
-                Err(err) => IpcResponse::err(&request.id, err),
-            };
+        // Dispatch to the appropriate handler, passing event_tx for progress sinks.
+        let response = match handlers::dispatch(
+            &request.method,
+            request.params,
+            Arc::clone(&state),
+            event_tx.clone(),
+        )
+        .await
+        {
+            Ok(result) => IpcResponse::ok(&request.id, result),
+            Err(err) => IpcResponse::err(&request.id, err),
+        };
 
         if send_json(&write_tx, &response).is_err() {
             error!("ipc: writer task closed for {}", request.id);

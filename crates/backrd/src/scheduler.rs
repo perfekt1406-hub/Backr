@@ -3,24 +3,27 @@
  *
  * This module provides:
  *   - `DaemonBackupTrigger` — implements `BackupTrigger` from `backr_core::scheduler`.
- *     When the periodic scheduler fires it spawns a Tokio task that (in U5) will run the
- *     real rsync backup.  For now (U4) the task logs a stub message and constructs an
- *     `IpcBroadcastSink` so the plumbing is exercisable before the real backup exists.
+ *     When the periodic scheduler fires it spawns a Tokio task that runs the real rsync
+ *     backup via `ipc::handlers::execute_backup_cycle_with_sink` and broadcasts progress
+ *     to connected GUI clients via `IpcBroadcastSink`.
  *   - `start_scheduler_if_configured` — reads the current config from `DaemonState` and
  *     calls `restart_scheduler` if a config is present.  Called once at daemon startup
- *     and again whenever config changes (U5).
+ *     and again whenever config changes (via `save_config` handler).
  *
  * No Tauri types are used anywhere in this file.
  */
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
+use backr_core::progress_sink::SharedProgress;
 use backr_core::scheduler::{restart_scheduler, BackupTrigger};
 
 use crate::daemon_state::DaemonState;
 use crate::event_sink::IpcBroadcastSink;
+use crate::ipc::handlers::execute_backup_cycle_with_sink;
 use crate::ipc::protocol::IpcEvent;
 
 // ---------------------------------------------------------------------------
@@ -35,9 +38,9 @@ use crate::ipc::protocol::IpcEvent;
 /// calls `trigger_backup` on each periodic tick.
 pub struct DaemonBackupTrigger {
     /// Shared daemon state (config, in-progress flag, last-backup timestamp).
-    state: Arc<DaemonState>,
+    pub(crate) state: Arc<DaemonState>,
     /// Sender side of the IPC event broadcast channel.
-    event_tx: broadcast::Sender<IpcEvent>,
+    pub(crate) event_tx: broadcast::Sender<IpcEvent>,
 }
 
 impl DaemonBackupTrigger {
@@ -52,11 +55,11 @@ impl DaemonBackupTrigger {
 }
 
 impl BackupTrigger for DaemonBackupTrigger {
-    /// Spawns an async task to execute a scheduled backup.
+    /// Spawns an async task to execute a scheduled backup of all projects.
     ///
-    /// The spawned task constructs an `IpcBroadcastSink` so that U5 can drop in
-    /// the real rsync call without needing to change any wiring.  For now (U4)
-    /// the task only logs a stub message and drops the sink.
+    /// Silently skips the tick when another backup job already holds the `in_progress`
+    /// flag (mirrors the behaviour of `backup_cmd.rs::run_scheduled_backup`).
+    /// Progress lines are broadcast to all connected clients via `IpcBroadcastSink`.
     ///
     /// Non-blocking: returns immediately after `tokio::spawn`.
     fn trigger_backup(&self) {
@@ -64,16 +67,45 @@ impl BackupTrigger for DaemonBackupTrigger {
         let tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            // U5 will replace this stub with the real rsync backup logic.
-            // The IpcBroadcastSink is constructed here so U5 can call
-            // `sink.backup_progress_line(...)` without additional wiring.
-            tracing::info!("scheduler: backup triggered (stub — real logic added in U5)");
+            // Skip silently when another backup is already running.
+            if state
+                .in_progress
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                tracing::info!("scheduler: backup tick skipped — another job is active");
+                return;
+            }
 
-            let sink = IpcBroadcastSink::new(tx);
+            tracing::info!("scheduler: backup triggered");
 
-            // Suppress unused-variable warnings — both will be used in U5.
-            drop(state);
-            drop(sink);
+            // Ensure in_progress is cleared when the task exits, even on error.
+            struct InProgressDrop(Arc<DaemonState>);
+            impl Drop for InProgressDrop {
+                fn drop(&mut self) {
+                    self.0.in_progress.store(false, Ordering::SeqCst);
+                }
+            }
+            let _clear = InProgressDrop(Arc::clone(&state));
+
+            /* IpcBroadcastSink implements ProgressSink — broadcasts rsync lines to all connected GUI clients. */
+            let sink: SharedProgress = Arc::new(IpcBroadcastSink::new(tx.clone()));
+
+            /* execute_backup_cycle_with_sink runs the full backup pipeline with rsync progress events. */
+            let res = execute_backup_cycle_with_sink(sink, &state, None).await;
+            if let Err(err) = res {
+                tracing::warn!("scheduler: scheduled backup failed: {err}");
+                let _ = tx.send(IpcEvent {
+                    event: "backup_progress".into(),
+                    data: serde_json::json!(format!("[backr] scheduled backup error: {err}")),
+                });
+            }
+
+            drop(_clear);
+            {
+                let mut ap = state.active_project.lock().await;
+                *ap = None;
+            }
         });
     }
 }
