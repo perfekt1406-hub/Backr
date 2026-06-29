@@ -940,12 +940,18 @@ install_backrd_daemon_service() {
   local service_dest="${service_dir}/backrd.service"
   # Replace the binary-path placeholder with the installed path.
   sed "s|BACKRD_BIN_PATH|${backrd_bin}|g" "$service_template" > "$service_dest"
-  systemctl --user daemon-reload
-  systemctl --user enable backrd.service
-  # restart (not start) so a re-run swaps in the freshly-copied binary — `start`
-  # is a no-op when the service is already running, leaving the old daemon live.
-  systemctl --user restart backrd.service
-  echo "Registered and started backrd systemd user service."
+  # Guard the `systemctl --user` calls: on sessions without a usable user bus
+  # (e.g. headless, or run as root) they fail, and unguarded they would abort the
+  # whole install under `set -e`.  restart (not start) so a re-run swaps in the
+  # freshly-copied binary — `start` is a no-op when the unit is already running.
+  systemctl --user daemon-reload 2>/dev/null || true
+  systemctl --user enable backrd.service 2>/dev/null || true
+  if systemctl --user restart backrd.service 2>/dev/null; then
+    echo "Registered and started backrd systemd user service."
+  else
+    echo "note: backrd is installed but the systemd --user service could not start" >&2
+    echo "      (no user session bus?). The GUI will launch backrd on demand." >&2
+  fi
 }
 
 #
@@ -1347,6 +1353,15 @@ clear_host_marker_for_client() {
 main() {
   parse_args "$@"
   require_linux
+
+  # The client installs a per-user app + `systemctl --user` service and elevates
+  # per-command on its own — running the whole thing as root/sudo installs it for
+  # root (~/.local under /root, useless to your desktop user) and breaks the
+  # `systemctl --user` step (root has no user session bus).  Refuse early with a
+  # clear message instead of producing a half-broken install.
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]] && [[ "${BACKR_ALLOW_ROOT:-0}" != "1" ]]; then
+    die "do not run the client installer as root/sudo — run it as your normal user. It asks for sudo per-command when needed. (Set BACKR_ALLOW_ROOT=1 to override for containers.)"
+  fi
 
   if [[ "${DO_UNINSTALL:-0}" -eq 1 ]]; then
     uninstall_backr
