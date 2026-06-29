@@ -942,7 +942,9 @@ install_backrd_daemon_service() {
   sed "s|BACKRD_BIN_PATH|${backrd_bin}|g" "$service_template" > "$service_dest"
   systemctl --user daemon-reload
   systemctl --user enable backrd.service
-  systemctl --user start backrd.service
+  # restart (not start) so a re-run swaps in the freshly-copied binary — `start`
+  # is a no-op when the service is already running, leaving the old daemon live.
+  systemctl --user restart backrd.service
   echo "Registered and started backrd systemd user service."
 }
 

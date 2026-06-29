@@ -1435,9 +1435,11 @@ install_backrd_daemon_service_for_user() {
   runuser -u "$target_user" -- \
     env XDG_RUNTIME_DIR="/run/user/${target_uid}" \
     systemctl --user enable backrd.service 2>/dev/null || true
+  # restart (not start) so a re-run swaps in the freshly-installed binary —
+  # `start` is a no-op when the service is already running.
   runuser -u "$target_user" -- \
     env XDG_RUNTIME_DIR="/run/user/${target_uid}" \
-    systemctl --user start backrd.service 2>/dev/null || true
+    systemctl --user restart backrd.service 2>/dev/null || true
   echo "Registered and started backrd systemd user service for ${target_user}."
 }
 
