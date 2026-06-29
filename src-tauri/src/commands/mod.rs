@@ -1,6 +1,9 @@
 /*
  * Tauri command handlers and shared DTOs for configuration, projects, backups, and snapshots.
- * Each submodule maps closely to the user-facing operations described in the product plan.
+ *
+ * Each submodule is a thin IPC proxy that forwards calls to the backrd daemon.
+ * The re-exports here preserve backward-compatible names so `lib.rs` and the scheduler
+ * can continue to reference the same symbol paths.
  */
 
 pub mod activity_cmd;

@@ -253,7 +253,7 @@ sudo chmod 600 {ak_q}\n",
 }
 
 /// JSON row for [`super::host_cmd::host_trust_status`].
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct HostTrustStatus {
     pub ssh_user: String,
     pub authorized_keys_path: String,
@@ -261,7 +261,7 @@ pub struct HostTrustStatus {
 }
 
 /// Result row for [`super::host_cmd::host_append_authorized_pubkey`].
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct HostTrustAppendResult {
     pub appended: bool,
     pub skipped_duplicate: bool,
@@ -386,7 +386,7 @@ fn count_existing(ak_path: &Path) -> usize {
 }
 
 /// One parsed entry from `authorized_keys`, suitable for the host Settings key list.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct AuthorizedPubkeyEntry {
     /// OpenSSH key type token, e.g. `ssh-ed25519`.
     pub key_type: String,
@@ -399,7 +399,7 @@ pub struct AuthorizedPubkeyEntry {
 }
 
 /// Result of removing one pubkey entry from `authorized_keys`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct HostRemovePubkeyResult {
     /// True when the line was found and removed.
     pub removed: bool,
