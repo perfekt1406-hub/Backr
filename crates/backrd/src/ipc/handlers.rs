@@ -506,7 +506,7 @@ async fn handle_get_config(_params: Value, state: Arc<DaemonState>) -> Result<Va
 /// Mirrors `src-tauri/src/commands/config_cmd.rs::save_config`.
 ///
 /// # Parameters
-/// - `params`   — full `Config` JSON object.
+/// - `params`   — `{ "config": <Config> }` (the proxy wraps the Config under `config`).
 /// - `state`    — config lock updated in place.
 /// - `event_tx` — passed to the scheduler trigger so backup tasks can emit events.
 async fn handle_save_config(
@@ -514,8 +514,12 @@ async fn handle_save_config(
     state: Arc<DaemonState>,
     event_tx: broadcast::Sender<IpcEvent>,
 ) -> Result<Value, IpcError> {
-    let next: Config =
-        serde_json::from_value(params).map_err(|e| IpcError::new("InvalidInput", e.to_string()))?;
+    let config_val = params
+        .get("config")
+        .cloned()
+        .ok_or_else(|| IpcError::new("InvalidInput", "save_config: missing 'config' parameter"))?;
+    let next: Config = serde_json::from_value(config_val)
+        .map_err(|e| IpcError::new("InvalidInput", e.to_string()))?;
 
     /* config::save_config writes config.toml atomically (write temp + rename). */
     config::save_config(&next).map_err(|e| cmd_err(BackrCommandError::from(e)))?;
@@ -1375,12 +1379,16 @@ async fn handle_pair_with_host(
 /// Mirrors `src-tauri/src/commands/pairing_cmd.rs::confirm_pairing`.
 ///
 /// # Parameters
-/// - `params` — the `PairDraft` returned by `pair_with_host`.
+/// - `params` — `{ "draft": <PairDraft> }` (the `PairDraft` returned by `pair_with_host`).
 async fn handle_confirm_pairing(
     params: Value,
     _state: Arc<DaemonState>,
 ) -> Result<Value, IpcError> {
-    let draft: PairDraft = serde_json::from_value(params)
+    let draft_val = params
+        .get("draft")
+        .cloned()
+        .ok_or_else(|| IpcError::new("InvalidInput", "confirm_pairing: missing 'draft' parameter"))?;
+    let draft: PairDraft = serde_json::from_value(draft_val)
         .map_err(|e| IpcError::new("InvalidInput", e.to_string()))?;
 
     /* confirm_pair_draft pins the host public key into known_hosts and returns the final Config. */
