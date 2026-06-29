@@ -34,6 +34,20 @@ export async function resolveShellBootstrap(): Promise<ShellBootstrap> {
 }
 
 /**
+ * Returns the daemon-connectivity error recorded at GUI startup, or null when the
+ * daemon was reachable. Used by the shell to show a clear "backrd unreachable"
+ * screen instead of a broken half-state when IPC calls fail.
+ *
+ * External: `invoke` → `get_daemon_error` returning `Option<String>`.
+ */
+export async function getDaemonError(): Promise<string | null> {
+  if (useDevMock()) {
+    return null;
+  }
+  return invoke<string | null>("get_daemon_error");
+}
+
+/**
  * Lists local snapshot directories under `backup_root` on this machine (host dashboard).
  *
  * External: `invoke` → `host_list_snapshot_projects`.
