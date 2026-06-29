@@ -22,8 +22,13 @@ use tokio::net::UnixStream;
 use crate::backup::rsync::BACKUP_PROGRESS_EVENT;
 use crate::error::{BackrCommandError, ErrorKind};
 
-/// Fixed JSON-RPC-like request id used for every call (single-request-per-connection model).
-const REQUEST_ID: u64 = 1;
+/// Fixed request id used for every call (single-request-per-connection model).
+///
+/// The daemon's `IpcRequest.id` is a `String`, so this MUST serialize as a JSON
+/// string. Sending a JSON number makes the daemon reject the request as a parse
+/// error (`invalid type: integer, expected a string`) while holding the connection
+/// open, which hangs the client's read loop forever.
+const REQUEST_ID: &str = "1";
 
 /// Resolves the canonical path of the backrd Unix domain socket.
 ///
@@ -80,6 +85,26 @@ fn map_daemon_error(err_obj: &Value) -> BackrCommandError {
     };
 
     BackrCommandError { kind, message }
+}
+
+/// Returns true when `parsed` is the final response line for our request — i.e. it
+/// carries an `id` matching `request_id`.
+///
+/// The daemon types the response `id` as a `String` and echoes it verbatim, so the
+/// match is done on the string value (not `as_u64`, which never matches a string id
+/// and would silently leave the read loop blocking forever). Event lines (which have
+/// no `id` key) and unrelated lines return false.
+///
+/// # Inputs
+///
+/// * `parsed`     — one parsed NDJSON line received from the daemon.
+/// * `request_id` — the id string this client sent.
+///
+/// # Returns
+///
+/// `true` if the line is the matching final response; `false` otherwise.
+fn is_final_response(parsed: &Value, request_id: &str) -> bool {
+    parsed.get("id").and_then(Value::as_str) == Some(request_id)
 }
 
 /// Connects to the backrd socket, sends one JSON-RPC request, and returns the result value.
@@ -199,7 +224,7 @@ async fn send_inner(
         }
 
         // Check if this is the final response for our request.
-        if parsed.get("id").and_then(Value::as_u64) == Some(REQUEST_ID) {
+        if is_final_response(&parsed, REQUEST_ID) {
             // Daemon returned an error object.
             if let Some(err_val) = parsed.get("error") {
                 return Err(map_daemon_error(err_val));
@@ -214,5 +239,54 @@ async fn send_inner(
         }
 
         // Line has neither a matching id nor an event — ignore and keep reading.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The daemon's `IpcRequest.id` is a `String` (crates/backrd/src/ipc/protocol.rs).
+    /// Sending a JSON number makes the daemon reject the request as a parse error
+    /// while holding the connection open, hanging the client forever. Guard that the
+    /// id we emit serializes as a JSON string.
+    #[test]
+    fn request_id_is_a_json_string() {
+        let request = json!({ "id": REQUEST_ID, "method": "get_config", "params": {} });
+        assert!(
+            request["id"].is_string(),
+            "id must serialize as a JSON string to satisfy the daemon's String-typed id"
+        );
+        assert_eq!(request["id"], json!("1"));
+    }
+
+    /// The daemon echoes the request id back as a string; the matcher must compare
+    /// it as a string for the read loop to recognize the final response.
+    #[test]
+    fn final_response_matches_on_string_id() {
+        assert!(is_final_response(
+            &json!({ "id": "1", "result": null }),
+            REQUEST_ID
+        ));
+    }
+
+    /// Regression guards for the original contract bug: a numeric id (old client),
+    /// the daemon's `"null"` parse-error reply, and a different request id must all
+    /// be treated as "not our response" rather than silently matched or mis-handled.
+    #[test]
+    fn final_response_rejects_numeric_or_mismatched_id() {
+        assert!(!is_final_response(
+            &json!({ "id": 1, "result": null }),
+            REQUEST_ID
+        ));
+        assert!(!is_final_response(
+            &json!({ "id": "null", "error": {} }),
+            REQUEST_ID
+        ));
+        assert!(!is_final_response(
+            &json!({ "id": "2", "result": null }),
+            REQUEST_ID
+        ));
     }
 }
