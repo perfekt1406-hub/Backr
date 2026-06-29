@@ -1,20 +1,24 @@
 /*
  * Lightweight backup activity samples for dashboard timelines.
- * Surfaces persisted cadence metadata without maintaining a separate event database.
+ *
+ * Thin IPC proxy: delegates to the backrd daemon and deserializes the response.
+ * The frontend `invoke()` call contract (function name, param types, return type) is
+ * preserved exactly.
  *
  * Returns `Result<T, BackrCommandError>` so the frontend receives a typed
  * `{ kind, message }` error object rather than a bare string.
  */
 
-use serde::Serialize;
 use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::BackrCommandError;
 use crate::state::AppState;
 
 /// One marker on the backup activity strip (Unix seconds + stable label key).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityPoint {
     /// Seconds since UNIX epoch (UTC).
     pub ts_unix: i64,
@@ -22,30 +26,21 @@ pub struct ActivityPoint {
     pub label: String,
 }
 
-/// Returns recent backup completion markers derived from persisted `[state]`.
+/// Returns recent backup completion markers from the daemon.
 ///
 /// # Inputs
 ///
-/// * `state` — managed [`AppState`] holding the loaded optional [`crate::config::Config`].
+/// * `state` — managed [`AppState`] (unused by the proxy; kept for signature compatibility).
 ///
 /// # Returns
 ///
 /// Empty when unconfigured or no successful backup yet; otherwise one point per stored completion.
 #[tauri::command]
 pub async fn get_activity_series(
-    state: State<'_, Arc<AppState>>,
+    _state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<ActivityPoint>, BackrCommandError> {
-    let cfg_opt = state.config.lock().await.clone();
-    /* Return an empty series gracefully when the app is not yet configured. */
-    let Some(cfg) = cfg_opt else {
-        return Ok(Vec::new());
-    };
-    let mut pts = Vec::new();
-    if let Some(last) = cfg.state.last_backup_at {
-        pts.push(ActivityPoint {
-            ts_unix: last.timestamp(),
-            label: "backup_complete".into(),
-        });
-    }
-    Ok(pts)
+    let v = crate::ipc_client::send("get_activity_series", serde_json::json!({})).await?;
+    serde_json::from_value(v).map_err(|e| {
+        BackrCommandError::config(format!("failed to deserialize activity series: {e}"))
+    })
 }

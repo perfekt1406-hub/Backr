@@ -1,5 +1,10 @@
 /*
- * Library entry: wires configuration loading, tray installation, scheduler startup, and commands.
+ * Library entry: wires configuration loading, tray installation, daemon connectivity, and commands.
+ *
+ * The scheduler and rsync logic now live in the backrd daemon.  This file bootstraps the
+ * Tauri window, verifies that the daemon socket is reachable (spawning backrd if needed),
+ * registers the IPC proxy commands, and sets up the system tray.
+ *
  * Exposes [`run()`] consumed by the small `main.rs` binary wrapper.
  *
  * Business-logic modules now live in `backr_core` (the `crates/backr-core` crate).
@@ -8,6 +13,7 @@
  */
 
 pub mod commands;
+pub mod ipc_client;
 pub mod progress_sink;
 pub mod scheduler;
 pub mod state;
@@ -28,7 +34,50 @@ pub use backr_core::project_snapshot_cache;
 use std::sync::Arc;
 
 use tauri::Manager;
-use tauri::WindowEvent;
+
+/// Attempts to connect to the backrd socket; if unreachable, tries to spawn backrd once
+/// and waits briefly before probing again.
+///
+/// This is best-effort: if the daemon is still not reachable after one spawn attempt the
+/// function returns `Err` with a human-readable message.  The GUI window still opens so the
+/// user can see the error rather than getting a silent crash.
+///
+/// # Returns
+///
+/// `Ok(())` when a connection to the daemon socket succeeds; `Err(String)` otherwise.
+async fn ensure_daemon_running() -> Result<(), String> {
+    let path = ipc_client::socket_path();
+
+    // First probe: is the daemon already listening?
+    if tokio::net::UnixStream::connect(&path).await.is_ok() {
+        return Ok(());
+    }
+
+    // Daemon not reachable — try to spawn it.
+    tracing::info!("backrd socket not found at {}; attempting to spawn backrd", path.display());
+    let spawn_result = tokio::process::Command::new("backrd").spawn();
+    match spawn_result {
+        Ok(_) => {
+            tracing::info!("backrd spawned; waiting 500 ms for it to bind");
+        }
+        Err(e) => {
+            tracing::warn!("could not spawn backrd: {e}");
+        }
+    }
+
+    // Allow time for backrd to create the socket.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Second probe: did the daemon start in time?
+    if tokio::net::UnixStream::connect(&path).await.is_ok() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "backrd daemon is not running and could not be started (socket: {})",
+        path.display()
+    ))
+}
 
 /// Bootstraps tracing, plugins, managed state, and the GTK/WebKit window host.
 ///
@@ -76,9 +125,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A second launch should reveal the existing instance.  The window may
-            // be hidden (hide-on-close) or minimized, so show + unminimize before
-            // focusing — set_focus alone cannot reveal a hidden window, which left
-            // the app un-reopenable from the launcher after the window was closed.
+            // be minimized, so show + unminimize before focusing.
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.unminimize();
@@ -92,16 +139,13 @@ pub fn run() {
                 handle.state::<Arc<state::AppState>>().inner().clone();
 
             tauri::async_runtime::block_on(async {
-                if let Ok(Some(cfg)) = config::load_config() {
-                    let mut last = state.last_backup_at.lock().await;
-                    *last = cfg.state.last_backup_at;
-                    drop(last);
-                    let mut guard = state.config.lock().await;
-                    *guard = Some(cfg);
-                }
-
-                if let Err(err) = scheduler::restart_scheduler(&handle, &state).await {
-                    tracing::warn!("failed to start scheduler: {err}");
+                // Check daemon connectivity before proceeding; store the error in state so
+                // the frontend can surface a clear error screen via `get_daemon_error`.
+                if let Err(err) = ensure_daemon_running().await {
+                    tracing::error!("daemon unreachable: {err}");
+                    let mut slot = state.daemon_error.lock().await;
+                    *slot = Some(err);
+                    // Continue anyway so the window opens — the frontend will display the error.
                 }
 
                 if let Err(err) = tray::create_tray(&handle) {
@@ -112,12 +156,6 @@ pub fn run() {
             });
 
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
-            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::activity_cmd::get_activity_series,
@@ -148,7 +186,23 @@ pub fn run() {
             commands::snapshot_cmd::restore_snapshot,
             commands::snapshot_cmd::restore_all_snapshots,
             commands::snapshot_cmd::restore_all_projects,
+            get_daemon_error,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Returns any daemon connectivity error recorded during startup, or `null` when the daemon is healthy.
+///
+/// The frontend calls this on load to determine whether to show an error screen instead of
+/// the normal dashboard.  Returns `None` (serialised as `null`) when the daemon started cleanly.
+///
+/// # Returns
+///
+/// `Ok(Some(message))` when the daemon was unreachable; `Ok(None)` when all is well.
+#[tauri::command]
+async fn get_daemon_error(
+    state: tauri::State<'_, Arc<state::AppState>>,
+) -> Result<Option<String>, error::BackrCommandError> {
+    Ok(state.daemon_error.lock().await.clone())
 }
