@@ -168,11 +168,10 @@ mod inner {
     /// Refreshes the tray tooltip with the current `last_backup_at` value from
     /// `DaemonState`.  Called after each successful backup tick.
     ///
-    /// Uses `blocking_lock` on `DaemonState::last_backup_at` because this
-    /// function is called from synchronous drop contexts as well as async ones.
-    /// The `ksni::Handle::update` call is itself synchronous and non-blocking
-    /// from the caller's perspective (it queues a D-Bus update on the service
-    /// thread).
+    /// Reads the timestamp via `format_label` (which uses a non-blocking
+    /// `try_lock`, safe to call from any thread).  The `ksni::Handle::update`
+    /// call is itself synchronous and non-blocking from the caller's
+    /// perspective (it queues a D-Bus update on the service thread).
     ///
     /// # Parameters
     /// - `state` — Shared daemon state; `last_backup_at` is read to format the
