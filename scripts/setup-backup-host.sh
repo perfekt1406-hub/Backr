@@ -52,6 +52,11 @@
 
 set -euo pipefail
 
+# Absolute path of the scripts/ directory — used to locate template files such as
+# backrd.service.template when running from a local checkout.  Tolerates piped
+# execution (curl | bash) where BASH_SOURCE[0] is /dev/stdin.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+
 BACKR_USER="${BACKR_USER:-backr}"
 BACKR_ROOT="${BACKR_ROOT:-/srv/backr}"
 DRY_RUN=0
@@ -1291,6 +1296,9 @@ install_host_app_from_appimage_url() {
     mkdir -p "$dest_dir"
     install -m 755 -o "$target_user" -g "$target_user" "$built_bin" "$dest"
     echo "Installed native binary: ${dest}"
+    # Install the backrd daemon service before the source tree is removed.
+    local backrd_built="${src_dir}/src-tauri/target/release/backrd"
+    install_backrd_daemon_service_for_user "$target_user" "$target_home" "$backrd_built"
     rm -rf "$src_dir"
     return 0
   fi
@@ -1313,6 +1321,86 @@ install_host_app_from_appimage_url() {
   fi
 
   install_host_appimage_binary "$appimage_src" "$target_user" "$target_home"
+  # When the binary came from a source build (non-Arch fallback), install backrd
+  # from the same workspace before the source tree is removed by the trap above.
+  if [[ -n "${built_src_dir:-}" ]]; then
+    local backrd_from_build="${built_src_dir}/src-tauri/target/release/backrd"
+    install_backrd_daemon_service_for_user "$target_user" "$target_home" "$backrd_from_build"
+  fi
+}
+
+#
+# Installs the backrd daemon binary from the build workspace and registers it as
+# a persistent systemd user service for the specified desktop user.
+#
+# The backrd binary is copied from the build source directory to
+# ~/.local/bin/backrd (owned by target_user) and then the systemd user service
+# unit is installed and started via `runuser` so it runs under the user session.
+#
+# Inputs:  $1 target_user   — OS username for whom to install the service.
+#          $2 target_home   — absolute home directory of target_user.
+#          $3 backrd_src    — absolute path to the built backrd binary.
+# Outputs: installs ~/.local/bin/backrd and ~/.config/systemd/user/backrd.service
+#          for target_user, then enables and starts the service.
+#
+install_backrd_daemon_service_for_user() {
+  local target_user="$1" target_home="$2" backrd_src="$3"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] install backrd daemon service for ${target_user}"
+    return 0
+  fi
+
+  if [[ ! -f "$backrd_src" ]]; then
+    echo "warning: backrd binary not found at ${backrd_src} — skipping daemon service install." >&2
+    return 0
+  fi
+
+  # Install backrd binary to the user's ~/.local/bin for a stable path.
+  local local_bin="${target_home}/.local/bin"
+  mkdir -p "$local_bin"
+  local backrd_bin="${local_bin}/backrd"
+  install -m 755 -o "$target_user" -g "$target_user" "$backrd_src" "$backrd_bin"
+  echo "Installed backrd daemon binary: ${backrd_bin}"
+
+  # Locate the service unit template; it lives alongside this script.
+  local service_template="${SCRIPT_DIR}/backrd.service.template"
+  if [[ ! -f "$service_template" ]]; then
+    echo "warning: ${service_template} not found — skipping systemd service install." >&2
+    return 0
+  fi
+
+  # Systemd user services are only available when systemctl is present.
+  if ! command -v systemctl &>/dev/null; then
+    echo "note: systemctl not found — skipping backrd systemd service install." >&2
+    return 0
+  fi
+
+  # Write the unit file into the user's config directory as root, then hand
+  # ownership to target_user so systemd --user can read it.
+  local service_dir="${target_home}/.config/systemd/user"
+  mkdir -p "$service_dir"
+  local service_dest="${service_dir}/backrd.service"
+  sed "s|BACKRD_BIN_PATH|${backrd_bin}|g" "$service_template" > "$service_dest"
+  chown "${target_user}:${target_user}" "$service_dest"
+
+  # Enable and start the service as the target user.  `runuser` preserves the
+  # user environment; XDG_RUNTIME_DIR is required by systemd --user.
+  local target_uid
+  target_uid="$(id -u "$target_user" 2>/dev/null)" || {
+    echo "warning: could not resolve UID for ${target_user} — backrd service not started." >&2
+    return 0
+  }
+  runuser -u "$target_user" -- \
+    env XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+    systemctl --user daemon-reload 2>/dev/null || true
+  runuser -u "$target_user" -- \
+    env XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+    systemctl --user enable backrd.service 2>/dev/null || true
+  runuser -u "$target_user" -- \
+    env XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+    systemctl --user start backrd.service 2>/dev/null || true
+  echo "Registered and started backrd systemd user service for ${target_user}."
 }
 
 #
