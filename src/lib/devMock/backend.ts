@@ -444,7 +444,7 @@ let mockPairingOpenedAt: number | null = null;
 export async function mockStartPairing(): Promise<PairingStarted> {
   await delay(120);
   mockPairingOpenedAt = Date.now();
-  return { code: "482913" };
+  return { code: "482913", host_key_fingerprint: "SHA256:devMockFingerprintAbC123dEf456gHi789jKl0" };
 }
 
 /** Host: closes the pairing window. */

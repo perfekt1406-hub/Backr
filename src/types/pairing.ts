@@ -5,9 +5,14 @@
 
 import type { Config } from "./config";
 
-/** Returned by `start_pairing` — the code to display while broadcasting. */
+/** Returned by `start_pairing` — the code plus the host's own SSH key fingerprint. */
 export interface PairingStarted {
   code: string;
+  /**
+   * SHA256 fingerprint of this host's SSH key (e.g. `SHA256:abc...`), shown on the
+   * host screen so the user can verify it matches the one the laptop displays.
+   */
+  host_key_fingerprint: string;
 }
 
 /** A host found on the LAN while it is in pairing mode. */

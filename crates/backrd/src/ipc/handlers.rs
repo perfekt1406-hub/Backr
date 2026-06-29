@@ -1297,7 +1297,15 @@ async fn handle_start_pairing(
         }
     });
 
-    to_json(serde_json::json!({ "code": code }))
+    // Return the host's own SSH key fingerprint alongside the code so the host UI
+    // can display it for out-of-band verification: the laptop shows the same
+    // fingerprint and asks the user to confirm the two screens match. Without this
+    // the host showed only the code and silently trusted the laptop on code-match,
+    // leaving the laptop's "verify against the host screen" step impossible.
+    to_json(serde_json::json!({
+        "code": code,
+        "host_key_fingerprint": host.host_key_fingerprint,
+    }))
 }
 
 /// Closes the pairing window if one is open.

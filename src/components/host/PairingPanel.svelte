@@ -29,6 +29,8 @@
 
   let broadcasting = $state(false);
   let code = $state<string | null>(null);
+  /** This host's SSH key fingerprint, shown so the user can verify it against the laptop. */
+  let fingerprint = $state<string | null>(null);
   let busy = $state(false);
   let err = $state<string | null>(null);
   let paired = $state(false);
@@ -49,6 +51,7 @@
     try {
       const started = await commands.startPairing();
       code = started.code;
+      fingerprint = started.host_key_fingerprint;
       broadcasting = true;
       clearPoll();
       poll = setInterval(() => {
@@ -59,6 +62,7 @@
               paired = true;
               broadcasting = false;
               code = null;
+              fingerprint = null;
               clearPoll();
             }
           })
@@ -76,6 +80,7 @@
     clearPoll();
     broadcasting = false;
     code = null;
+    fingerprint = null;
     try {
       await commands.stopPairing();
     } catch {
@@ -135,6 +140,20 @@
     <p class="mt-3 text-[12px] text-[var(--muted2)]">
       On the laptop: open Backr → pick this host → type the code above.
     </p>
+    {#if fingerprint}
+      <!-- Host SSH key fingerprint for out-of-band verification: the laptop shows the
+           same value and asks the user to confirm both screens match. -->
+      <div class="mt-3 rounded-[6px] border border-[var(--border)] bg-[var(--bg4)] px-3 py-2.5">
+        <p class="label-caps mb-1 text-[var(--muted)]">This host's key fingerprint</p>
+        <p class="font-mono text-[12px] tracking-wide text-[var(--text)] select-all break-all">
+          {fingerprint}
+        </p>
+        <p class="mt-1.5 text-[11px] text-[var(--muted2)]">
+          The laptop will show this fingerprint and ask you to verify it matches — confirm
+          the two screens are identical before approving on the laptop.
+        </p>
+      </div>
+    {/if}
   {:else if paired}
     <!-- Paired state: confirmation + option to add another -->
     <p class="{isInline ? '' : 'mt-4'} text-[13px] font-medium text-[var(--accent)]">
