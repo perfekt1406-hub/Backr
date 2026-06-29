@@ -5,7 +5,8 @@
  *   - `DaemonBackupTrigger` — implements `BackupTrigger` from `backr_core::scheduler`.
  *     When the periodic scheduler fires it spawns a Tokio task that runs the real rsync
  *     backup via `ipc::handlers::execute_backup_cycle_with_sink` and broadcasts progress
- *     to connected GUI clients via `IpcBroadcastSink`.
+ *     to connected GUI clients via `IpcBroadcastSink`.  After each successful backup the
+ *     tray label is refreshed (Linux only; no-op on other platforms).
  *   - `start_scheduler_if_configured` — reads the current config from `DaemonState` and
  *     calls `restart_scheduler` if a config is present.  Called once at daemon startup
  *     and again whenever config changes (via `save_config` handler).
@@ -60,6 +61,7 @@ impl BackupTrigger for DaemonBackupTrigger {
     /// Silently skips the tick when another backup job already holds the `in_progress`
     /// flag (mirrors the behaviour of `backup_cmd.rs::run_scheduled_backup`).
     /// Progress lines are broadcast to all connected clients via `IpcBroadcastSink`.
+    /// On Linux, the system tray label is updated after each successful backup.
     ///
     /// Non-blocking: returns immediately after `tokio::spawn`.
     fn trigger_backup(&self) {
@@ -99,6 +101,11 @@ impl BackupTrigger for DaemonBackupTrigger {
                     event: "backup_progress".into(),
                     data: serde_json::json!(format!("[backr] scheduled backup error: {err}")),
                 });
+            } else {
+                // Refresh the system tray tooltip with the new last-backup time.
+                // On non-Linux platforms this call compiles to a no-op.
+                #[cfg(target_os = "linux")]
+                crate::tray::update_label(&state);
             }
 
             drop(_clear);

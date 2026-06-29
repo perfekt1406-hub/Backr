@@ -10,17 +10,16 @@
  *  5. Allocate `Arc<DaemonState>`.
  *  6. Create the IPC broadcast channel (`tokio::sync::broadcast`).
  *  7. Start the scheduler if a config file already exists on disk.
- *  8. Accept client connections in a loop, spawning one Tokio task per
+ *  8. Spawn the Linux system tray (U6); no-op on non-Linux platforms.
+ *  9. Accept client connections in a loop, spawning one Tokio task per
  *     connection via `ipc::handle_connection` with a fresh channel subscription.
- *
- * Backup logic (U5) and system-tray integration (U6) will be wired in here in
- * subsequent units.
  */
 
 mod daemon_state;
 mod event_sink;
 mod ipc;
 mod scheduler;
+mod tray;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -129,6 +128,10 @@ async fn main() {
     // If no config file exists this is a no-op; the scheduler will be (re)started
     // by the config-save handler in U5.
     start_scheduler_if_configured(Arc::clone(&state), event_tx.clone()).await;
+
+    // Spawn the Linux system tray (U6).
+    // On non-Linux platforms this is a no-op stub that compiles to nothing.
+    tray::spawn_tray(Arc::clone(&state), event_tx.clone());
 
     // Accept loop: one Tokio task per connection.
     loop {
