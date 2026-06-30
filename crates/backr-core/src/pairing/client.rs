@@ -21,7 +21,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    known_hosts_path, Config, LocalConfig, RemoteConfig, ScheduleConfig, StateConfig,
+    known_hosts_path, Config, LocalConfig, RemoteConfig, ScheduleConfig, StateConfig, UpdateConfig,
+    CONFIG_VERSION,
 };
 use crate::pairing::discovery::hostname_short;
 
@@ -96,6 +97,7 @@ pub fn pair_with_host(address: &str, code: &str) -> Result<PairDraft, String> {
     // Build the config draft but do NOT pin the known_host or save yet — the user must
     // first verify the fingerprint shown here matches what is displayed on the host screen.
     let config = Config {
+        version: CONFIG_VERSION,
         remote: RemoteConfig {
             host: ssh_target.clone(),
             user: reply.ssh_user,
@@ -110,6 +112,7 @@ pub fn pair_with_host(address: &str, code: &str) -> Result<PairDraft, String> {
         state: StateConfig {
             last_backup_at: None,
         },
+        update: UpdateConfig::default(),
     };
 
     Ok(PairDraft {

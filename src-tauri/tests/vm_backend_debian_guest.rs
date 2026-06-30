@@ -18,7 +18,7 @@ use backr_lib::backup::ssh::{remote_list_children, remote_list_snapshot_names};
 use backr_lib::commands::backup_cmd::execute_backup_cycle_with_sink;
 use backr_lib::config::{
     expand_path_str, known_hosts_path, Config, LocalConfig, RemoteConfig, ScheduleConfig,
-    StateConfig,
+    StateConfig, UpdateConfig, CONFIG_VERSION,
 };
 use backr_lib::progress_sink::CollectLines;
 use backr_lib::state::AppState;
@@ -46,6 +46,7 @@ async fn qemu_debian_backup_pipeline_matches_remote_find() {
     let key_expanded = expand_path_str(&key_path.display().to_string()).expect("expand ssh key");
 
     let config = Config {
+        version: CONFIG_VERSION,
         remote: RemoteConfig {
             host: host.clone(),
             user,
@@ -60,6 +61,7 @@ async fn qemu_debian_backup_pipeline_matches_remote_find() {
         state: StateConfig {
             last_backup_at: None,
         },
+        update: UpdateConfig::default(),
     };
 
     backr_lib::backup::ssh::test_connection(

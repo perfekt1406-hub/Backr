@@ -184,7 +184,8 @@ impl PairingStateAccess for DaemonState {
 mod tests {
     use super::*;
     use backr_core::config::{
-        save_config, Config, LocalConfig, RemoteConfig, ScheduleConfig, StateConfig,
+        save_config, Config, LocalConfig, RemoteConfig, ScheduleConfig, StateConfig, UpdateConfig,
+        CONFIG_VERSION,
     };
 
     /// Regression test for the startup-hydration bug: a daemon coming up with an
@@ -215,6 +216,7 @@ mod tests {
 
         // Persist a config, then a freshly-constructed daemon must pick it up at startup.
         let cfg = Config {
+            version: CONFIG_VERSION,
             remote: RemoteConfig {
                 host: "nas.local".into(),
                 user: "backr".into(),
@@ -229,6 +231,7 @@ mod tests {
             state: StateConfig {
                 last_backup_at: None,
             },
+            update: UpdateConfig::default(),
         };
         save_config(&cfg).unwrap();
 
