@@ -15,6 +15,8 @@
 #
 # Re-running reinstalls/updates: it rebuilds from the latest source and replaces the
 # installed app, stopping any running instance first so the update takes effect.
+# Existing config (~/.config/backr — pairing, schedule, host trust) is PRESERVED by
+# default; pass --fresh (or BACKR_FRESH=1) to wipe it for a clean-slate install.
 # Run as your normal user (NOT sudo) — the script elevates per-command for package installs.
 #
 # Options:
@@ -33,6 +35,7 @@
 #   --appimage-url URL             Download a prebuilt AppImage and add launcher entry only (no compile; needs libfuse2).
 #   --reinstall-launcher           Re-copy the menu entry + icons + desktop DB (no full build), reusing the installed binary/AppImage.
 #   --uninstall                    Remove the installed app (binary, launcher entry, icons). Keeps config, SSH keys, toolchain.
+#   --fresh                        Wipe ~/.config/backr on (re)install (clean slate). Default preserves pairing/schedule/host trust.
 #   --non-interactive              Skip questionnaire and abbreviated default next-steps (CI / pipes).
 #   -h, --help                     Show this text.
 #
@@ -44,6 +47,7 @@
 #   BACKR_YES_SSH_COPY_ID=1    Same as --yes-ssh-copy-id (skip confirmation before ssh-copy-id).
 #   BACKR_AUTO_SSH_KEY=1       Same as --auto-ssh-key (create Ed25519 key without prompting when missing).
 #   BACKR_NON_INTERACTIVE=1    Same as --non-interactive.
+#   BACKR_FRESH=1              Same as --fresh (wipe ~/.config/backr on (re)install for a clean slate).
 
 set -euo pipefail
 
@@ -55,6 +59,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd || tr
 SRC_IS_TEMP=0
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/Projects}"
 SKIP_KEYGEN=0
+# When 1, wipe ~/.config/backr on (re)install for a clean slate. Default 0: re-running
+# the installer PRESERVES pairing/schedule/host-trust so an update is non-destructive
+# (see --fresh / BACKR_FRESH).
+FRESH="${BACKR_FRESH:-0}"
 # When 1, skip interactive ssh-copy-id after failed BatchMode probe (see BACKR_NO_SSH_COPY_ID).
 SKIP_SSH_COPY_ID="${BACKR_NO_SSH_COPY_ID:-0}"
 # Exclusive setup goal: build (default) | deps | download — see set_setup_kind().
@@ -168,6 +176,10 @@ parse_args() {
         ;;
       --non-interactive)
         BACKR_NON_INTERACTIVE=1
+        shift
+        ;;
+      --fresh)
+        FRESH=1
         shift
         ;;
       -h | --help)
@@ -1204,8 +1216,9 @@ uninstall_backr() {
 
 #
 # Detects an existing Backr installation under ~/.local/share/backr and removes it
-# before a fresh build/download install.  Leaves config — config is handled separately
-# by clear_backr_config_for_reinstall.  Called at the start of every build/download flow.
+# before a build/download install.  Leaves config — config is handled separately
+# by clear_backr_config_if_fresh (preserved by default, wiped only with --fresh).
+# Called at the start of every build/download flow.
 #
 remove_existing_install_if_present() {
   local dir="$HOME/.local/share/backr"
@@ -1230,9 +1243,9 @@ remove_existing_install_if_present() {
 }
 
 #
-# Wipes ~/.config/backr so the app opens in setup/pairing mode after a reinstall.
-# Always called for build and download flows — independent of whether a prior binary
-# was found — so stale config never carries over from a previous install.
+# Wipes ~/.config/backr so the app opens in setup/pairing mode.
+# Only invoked for --fresh / BACKR_FRESH=1 installs (via clear_backr_config_if_fresh).
+# A normal (re)install preserves config so updates are non-destructive.
 # SSH keys in ~/.ssh are never touched.
 #
 clear_backr_config_for_reinstall() {
@@ -1241,6 +1254,21 @@ clear_backr_config_for_reinstall() {
   if [[ -d "$cfg_dir" ]]; then
     rm -rf "$cfg_dir"
     echo "Cleared Backr config (${cfg_dir}) — app will open in setup/pairing mode."
+  fi
+}
+
+#
+# Config policy for build/download (re)installs: PRESERVE by default so re-running the
+# installer keeps pairing, schedule, and host-trust (a non-destructive update). Only the
+# explicit --fresh / BACKR_FRESH=1 opt-in clears it for a clean slate.
+#
+clear_backr_config_if_fresh() {
+  local cfg_dir
+  cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/backr"
+  if [[ "$FRESH" == "1" ]]; then
+    clear_backr_config_for_reinstall
+  elif [[ -d "$cfg_dir" ]]; then
+    echo "Preserving existing Backr config (${cfg_dir}) — pairing, schedule, and host trust kept. Pass --fresh to wipe."
   fi
 }
 
@@ -1407,7 +1435,7 @@ main() {
   case "$SETUP_KIND" in
     download)
       remove_existing_install_if_present
-      clear_backr_config_for_reinstall
+      clear_backr_config_if_fresh
       clear_host_marker_for_client
       install_appimage_from_network
       ensure_mdns_resolution
@@ -1424,7 +1452,7 @@ main() {
       ;;
     build)
       remove_existing_install_if_present
-      clear_backr_config_for_reinstall
+      clear_backr_config_if_fresh
       clear_host_marker_for_client
       install_app_build_and_integrate
       ensure_mdns_resolution
