@@ -1,0 +1,90 @@
+# Backr release pipeline.
+#
+# Cut a release by pushing a version tag (e.g. v0.4.2) — see scripts/release.sh.
+# This builds the three Linux binaries the self-update client downloads and
+# attaches them, named <bin>-linux-<arch> alongside a SHA256SUMS manifest, to the
+# GitHub Release for the tag. The client verifies each binary against SHA256SUMS
+# before swapping it in, so the asset names here MUST match
+# backr_core::update::release::asset_name (<bin>-linux-<arch>) and CHECKSUM_ASSET.
+#
+# Linux-first: macOS artifacts are deliberately out of scope for now.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  release-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Tauri / WebKitGTK system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libssl-dev \
+            build-essential curl wget file pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build daemon and CLI
+        run: cargo build -p backrd -p backr-cli --release
+
+      - name: Build desktop app binary
+        run: pnpm tauri build --no-bundle
+
+      - name: Stage release assets
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          mkdir -p dist
+          cp target/release/backrd    "dist/backrd-linux-${arch}"
+          cp target/release/backr     "dist/backr-linux-${arch}"
+          cp target/release/backr-app "dist/backr-app-linux-${arch}"
+          (
+            cd dist
+            sha256sum \
+              "backrd-linux-${arch}" \
+              "backr-linux-${arch}" \
+              "backr-app-linux-${arch}" > SHA256SUMS
+          )
+          echo "Staged assets:"
+          ls -l dist
+          echo "----"
+          cat dist/SHA256SUMS
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/backrd-linux-*
+            dist/backr-linux-*
+            dist/backr-app-linux-*
+            dist/SHA256SUMS
+          generate_release_notes: true
