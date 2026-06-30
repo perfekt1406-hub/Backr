@@ -31,23 +31,51 @@ export function createInitialMockConfig(): Config {
   };
 }
 
-/** Dashboard rows — names align with snapshot/browser fixtures below. */
+/**
+ * Builds a dashboard `ProjectInfo` row.
+ *
+ * @param name           project folder name shown in the list
+ * @param snapshotCount  number of snapshots indexed for the project
+ * @param minutesAgo     minutes since the last backup, or `null` for never-backed-up
+ */
+function projectRow(
+  name: string,
+  snapshotCount: number,
+  minutesAgo: number | null,
+): ProjectInfo {
+  return {
+    name,
+    snapshot_count: snapshotCount,
+    last_backup_at:
+      minutesAgo === null ? null : new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+  };
+}
+
+/** Dashboard rows — snapshot/file browsing is project-agnostic, so any name resolves. */
 export const MOCK_PROJECT_ROWS: ProjectInfo[] = [
-  {
-    name: "acme-api",
-    last_backup_at: new Date(Date.now() - 7200_000).toISOString(),
-    snapshot_count: 12,
-  },
-  {
-    name: "backr-ui",
-    last_backup_at: new Date(Date.now() - 400_000).toISOString(),
-    snapshot_count: 28,
-  },
-  {
-    name: "legacy-monolith",
-    last_backup_at: null,
-    snapshot_count: 0,
-  },
+  projectRow("acme-api", 12, 120),
+  projectRow("backr-ui", 28, 7),
+  projectRow("legacy-monolith", 0, null),
+  projectRow("payments-service", 34, 45),
+  projectRow("auth-gateway", 18, 90),
+  projectRow("notification-worker", 9, 15),
+  projectRow("analytics-pipeline", 52, 1440),
+  projectRow("mobile-app", 0, null),
+  projectRow("web-storefront", 21, 300),
+  projectRow("admin-dashboard", 14, 25),
+  projectRow("search-indexer", 40, 720),
+  projectRow("image-resizer", 7, 180),
+  projectRow("billing-cron", 30, 60),
+  projectRow("graphql-gateway", 16, 5),
+  projectRow("user-profile-svc", 25, 2880),
+  projectRow("inventory-db", 11, 8),
+  projectRow("recommendation-engine", 19, 480),
+  projectRow("email-templates", 0, null),
+  projectRow("infra-terraform", 6, 4320),
+  projectRow("docs-site", 3, 35),
+  projectRow("ml-training", 47, 1080),
+  projectRow("event-bus", 22, 12),
+  projectRow("cache-proxy", 8, 200),
 ];
 
 /** Snapshot IDs shared across projects for predictable URLs during manual QA. */

@@ -65,6 +65,20 @@ body {
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
 }
 
+/**
+ * Hide the scrollbar on scroll panes while keeping them scrollable (wheel/trackpad).
+ * WebKitGTK and Firefox draw native overlay bars that recolor and grow on hover and
+ * show trough lines — none of which CSS can restyle — so the element scrolls with no
+ * visible bar at all.
+ */
+.backr-scroll {
+  scrollbar-width: none; /* Firefox + WebKitGTK */
+}
+.backr-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0; /* Chromium / WebKit */
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

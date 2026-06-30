@@ -21,6 +21,7 @@
 
   import { getConfig, getDaemonError, resolveShellBootstrap } from "./lib/commands";
   import { registerMockProgressAppender } from "./lib/mockProgressSink";
+  import { isTauri } from "@tauri-apps/api/core";
   import routes from "./routes";
   import type { ShellBootstrap } from "./types/shellBootstrap";
   import { appendProgressLine } from "./stores/backup";
@@ -135,16 +136,21 @@
 
         // Re-evaluate bootstrap whenever the window is focused after being hidden
         // (e.g. config deleted while hidden in tray — next show picks up new state).
-        unlistenFocus = await getCurrentWindow().onFocusChanged(async ({ payload: focused }) => {
-          if (!focused) return;
-          try {
-            const fresh = await resolveShellBootstrap();
-            if (fresh.mode === get(shellKind)) return;
-            await applyBootstrap(fresh);
-          } catch {
-            // Ignore re-check errors — stale mode is better than a crash on focus.
-          }
-        });
+        // Tauri-window-only: a plain browser (e.g. `pnpm dev:mock`) has no window
+        // runtime, so calling getCurrentWindow() there throws and would mask a healthy
+        // app as a daemon error. Runs in every Tauri webview, including tauri:dev:mock.
+        if (isTauri()) {
+          unlistenFocus = await getCurrentWindow().onFocusChanged(async ({ payload: focused }) => {
+            if (!focused) return;
+            try {
+              const fresh = await resolveShellBootstrap();
+              if (fresh.mode === get(shellKind)) return;
+              await applyBootstrap(fresh);
+            } catch {
+              // Ignore re-check errors — stale mode is better than a crash on focus.
+            }
+          });
+        }
 
         const onHash = (): void => {
           const mode = get(shellKind);

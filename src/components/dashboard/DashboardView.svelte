@@ -15,6 +15,7 @@
   import DashboardSummaryCards from "./DashboardSummaryCards.svelte";
   import DashboardSystemInfo from "./DashboardSystemInfo.svelte";
   import ProjectListItem from "./ProjectListItem.svelte";
+  import ScrollArea from "../shared/ScrollArea.svelte";
   import StatusBadge from "../shared/StatusBadge.svelte";
   import {
     backupStatus,
@@ -112,8 +113,8 @@
   </header>
 
   <div class="grid min-h-0 flex-1 gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-    <section class="flex flex-col gap-4">
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+    <section class="flex min-h-0 flex-col gap-4">
+      <div class="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2">
         <h2 class="label-caps shrink-0 text-[var(--muted)]">Projects</h2>
         <button
           type="button"
@@ -142,7 +143,14 @@
           </button>
         </div>
       </div>
-      <div class="flex flex-col gap-3">
+      <!-- Scroll pane: only the project list scrolls (the page stays put with many
+           projects). On lg the viewport is absolutely positioned so its height
+           can't inflate the grid row. ScrollArea hides the unstyleable native bar
+           and overlays a custom one matching the panel aesthetic. -->
+      <ScrollArea
+        class="min-h-0 flex-1"
+        viewportClass="flex flex-col gap-3 lg:absolute lg:inset-0 lg:overflow-y-auto lg:pr-3"
+      >
         {#if $projects.length === 0}
           <div
             class="rounded-[8px] border border-dashed border-[var(--border2)] px-4 py-8 text-center text-[13px] text-[var(--muted)]"
@@ -154,7 +162,7 @@
             <ProjectListItem {row} />
           {/each}
         {/if}
-      </div>
+      </ScrollArea>
     </section>
 
     <div class="flex min-h-0 flex-col gap-6 lg:min-h-[min(80vh,720px)]">
