@@ -46,6 +46,7 @@ use backr_core::project_snapshot_cache::{
     self, load_snapshot_cache, remote_cache_key, save_snapshot_cache,
 };
 use backr_core::scheduler::restart_scheduler;
+use backr_core::update;
 use tiny_http::Server;
 
 use crate::daemon_state::DaemonState;
@@ -149,6 +150,12 @@ pub async fn dispatch(
         "test_connection" => handle_test_connection(params, state).await,
         "get_system_info" => handle_get_system_info(params, state).await,
         "resolve_shell_bootstrap" => handle_resolve_shell_bootstrap(params, state).await,
+
+        // Self-update domain.
+        "get_update_status" => handle_get_update_status(params, state).await,
+        "get_update_settings" => handle_get_update_settings(params, state).await,
+        "set_update_settings" => handle_set_update_settings(params, state).await,
+        "apply_update" => handle_apply_update(params, state).await,
 
         // Project domain.
         "list_projects" => handle_list_projects(params, state).await,
@@ -595,6 +602,115 @@ async fn handle_get_system_info(
         "user": std::env::var("USER").ok().or_else(|| std::env::var("USERNAME").ok()),
         "sampled_at_rfc3339": chrono::Local::now().to_rfc3339(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Self-update domain
+// ---------------------------------------------------------------------------
+
+/// Reports the running version and whether a newer release is available.
+///
+/// Runs the blocking, network-bound check off the async runtime.
+async fn handle_get_update_status(
+    _params: Value,
+    _state: Arc<DaemonState>,
+) -> Result<Value, IpcError> {
+    let status = tokio::task::spawn_blocking(update::check_for_update)
+        .await
+        .map_err(|e| IpcError::new("TaskFailed", format!("update check task failed: {e}")))?
+        .map_err(|e| cmd_err(BackrCommandError::from(e)))?;
+    to_json(status)
+}
+
+/// Returns the persisted update preferences (`{ "auto_update": bool }`).
+async fn handle_get_update_settings(
+    _params: Value,
+    state: Arc<DaemonState>,
+) -> Result<Value, IpcError> {
+    let auto = {
+        let guard = state.config.lock().await;
+        guard.as_ref().map(|c| c.update.auto_update).unwrap_or(false)
+    };
+    to_json(serde_json::json!({ "auto_update": auto }))
+}
+
+/// Persists the auto-update preference. Requires a configured (paired) client,
+/// since the setting lives in `config.toml`.
+///
+/// # Parameters
+/// - `params` — `{ "auto_update": bool }`.
+async fn handle_set_update_settings(
+    params: Value,
+    state: Arc<DaemonState>,
+) -> Result<Value, IpcError> {
+    let auto_update = params
+        .get("auto_update")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| {
+            IpcError::new("InvalidInput", "set_update_settings: missing bool 'auto_update'")
+        })?;
+
+    let mut next = {
+        let guard = state.config.lock().await;
+        guard
+            .clone()
+            .ok_or_else(|| IpcError::new("NotConfigured", "cannot set auto-update before pairing"))?
+    };
+    next.update.auto_update = auto_update;
+    config::save_config(&next).map_err(|e| cmd_err(BackrCommandError::from(e)))?;
+    {
+        let mut guard = state.config.lock().await;
+        *guard = Some(next);
+    }
+    to_json(serde_json::json!({ "auto_update": auto_update }))
+}
+
+/// Launches an out-of-process worker to download, verify, swap, and restart.
+///
+/// The daemon cannot replace and restart its own running binary, so the update
+/// runs in the `backr` CLI launched outside backrd's service cgroup
+/// (`systemd-run --user --scope`) — stopping `backrd.service` then does not kill
+/// the updater (KTD4). Refuses while a backup is in progress (R7).
+async fn handle_apply_update(
+    _params: Value,
+    state: Arc<DaemonState>,
+) -> Result<Value, IpcError> {
+    if state.in_progress.load(Ordering::SeqCst) {
+        return Err(IpcError::new(
+            "BackupInProgress",
+            "cannot update while a backup is in progress",
+        ));
+    }
+    let backr = update::swap::installed_target_path("backr")
+        .map_err(|e| cmd_err(BackrCommandError::from(e)))?;
+    spawn_update_worker(&backr).map_err(|e| IpcError::new("TaskFailed", e))?;
+    to_json(serde_json::json!({ "status": "started" }))
+}
+
+/// Spawns the detached `backr update` worker, preferring a transient systemd
+/// scope so it survives the `backrd` restart it performs. Falls back to a plain
+/// detached spawn where `systemd-run` is unavailable.
+fn spawn_update_worker(backr: &Path) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    let scoped = Command::new("systemd-run")
+        .args(["--user", "--scope", "--collect", "--quiet"])
+        .arg(backr)
+        .args(["update", "--from-daemon"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if scoped.is_ok() {
+        return Ok(());
+    }
+    Command::new(backr)
+        .args(["update", "--from-daemon"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not launch update worker: {e}"))
 }
 
 /// Determines whether to send the user to setup, client, or host-dashboard mode.
