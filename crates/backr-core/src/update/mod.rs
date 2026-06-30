@@ -10,6 +10,7 @@
  */
 
 pub mod release;
+pub mod swap;
 
 use serde::Serialize;
 
