@@ -31,3 +31,5 @@ rand               = { workspace = true }
 tiny_http          = { workspace = true }
 mdns-sd            = { workspace = true }
 tokio-util         = { workspace = true }
+ureq               = { workspace = true }
+sha2               = { workspace = true }

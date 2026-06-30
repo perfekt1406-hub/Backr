@@ -46,3 +46,7 @@ tokio-util   = { version = "0.7", features = ["rt"] }
 uuid         = { version = "1",    features = ["v4"] }
 anyhow       = "1"
 clap         = { version = "4", features = ["derive"] }
+# Self-update engine: in-process HTTPS (rustls by default) + SHA-256 verification,
+# so verify-before-swap is typed in-crate rather than parsed from a subprocess.
+ureq         = "3"
+sha2         = "0.10"

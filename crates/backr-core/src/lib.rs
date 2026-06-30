@@ -18,6 +18,7 @@
  *  progress_sink    — ProgressSink trait + CollectLines test helper.
  *  project_snapshot_cache — Per-project remote snapshot stats local cache.
  *  scheduler        — Periodic backup scheduler with BackupTrigger abstraction.
+ *  update           — Self-update engine: release lookup, download, SHA-256 verify.
  */
 
 pub mod backup;
@@ -31,6 +32,7 @@ pub mod pairing;
 pub mod progress_sink;
 pub mod project_snapshot_cache;
 pub mod scheduler;
+pub mod update;
 
 /// Returns the shared workspace version embedded in this binary at build time.
 ///

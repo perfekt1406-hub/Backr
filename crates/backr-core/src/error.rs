@@ -52,6 +52,10 @@ pub enum BackrError {
     #[error("a backup is already in progress")]
     BackupInProgress,
 
+    /// Self-update failures (release lookup, download, checksum verification, swap).
+    #[error("update error: {0}")]
+    Update(String),
+
     /// Generic message bucket for rare paths that are still surfaced to users.
     #[error("{0}")]
     Msg(String),
@@ -266,6 +270,7 @@ impl From<BackrError> for BackrCommandError {
     /// | `Remote`             | `SshFailed`               |
     /// | `Regex`              | `Config`                  |
     /// | `BackupInProgress`   | `BackupInProgress`        |
+    /// | `Update`             | `TaskFailed`              |
     /// | `Msg`                | `InvalidInput`            |
     fn from(e: BackrError) -> Self {
         match e {
@@ -277,6 +282,7 @@ impl From<BackrError> for BackrCommandError {
             BackrError::Remote(m) => Self::ssh_failed(m),
             BackrError::Regex(e) => Self::config(e.to_string()),
             BackrError::BackupInProgress => Self::backup_in_progress(),
+            BackrError::Update(m) => Self::task_failed(m),
             BackrError::Msg(m) => Self::invalid_input(m),
         }
     }
