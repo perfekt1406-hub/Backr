@@ -156,6 +156,7 @@ pub async fn dispatch(
         "get_update_settings" => handle_get_update_settings(params, state).await,
         "set_update_settings" => handle_set_update_settings(params, state).await,
         "apply_update" => handle_apply_update(params, state).await,
+        "auto_update_tick" => handle_auto_update_tick(params, state).await,
 
         // Project domain.
         "list_projects" => handle_list_projects(params, state).await,
@@ -685,6 +686,42 @@ async fn handle_apply_update(
         .map_err(|e| cmd_err(BackrCommandError::from(e)))?;
     spawn_update_worker(&backr).map_err(|e| IpcError::new("TaskFailed", e))?;
     to_json(serde_json::json!({ "status": "started" }))
+}
+
+/// Auto-update poke from a surface (GUI launch / CLI run): if auto-update is on
+/// and the throttle window has elapsed, check for a release and apply it in the
+/// background. Returns immediately — the check and worker launch run off the
+/// response path so the caller is never blocked (R16, R17).
+async fn handle_auto_update_tick(
+    _params: Value,
+    state: Arc<DaemonState>,
+) -> Result<Value, IpcError> {
+    let auto = {
+        state
+            .config
+            .lock()
+            .await
+            .as_ref()
+            .map(|c| c.update.auto_update)
+            .unwrap_or(false)
+    };
+    if auto && update::should_check(update::AUTO_CHECK_WINDOW) {
+        update::record_check();
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let status = match tokio::task::spawn_blocking(update::check_for_update).await {
+                Ok(Ok(s)) => s,
+                _ => return,
+            };
+            // R7: never apply while a backup is in progress.
+            if status.update_available && !state.in_progress.load(Ordering::SeqCst) {
+                if let Ok(backr) = update::swap::installed_target_path("backr") {
+                    let _ = spawn_update_worker(&backr);
+                }
+            }
+        });
+    }
+    to_json(serde_json::json!({ "status": "ok" }))
 }
 
 /// Spawns the detached `backr update` worker, preferring a transient systemd

@@ -194,6 +194,14 @@ async fn main() {
 ///
 /// `Ok(())` on success; `Err` with a human-readable message on failure.
 async fn run(cli: Cli) -> Result<()> {
+    // Auto-update tick: poke the daemon to consider applying an update (a no-op when
+    // auto-update is off or the throttle window hasn't elapsed). Best-effort — never
+    // blocks or fails the requested command. Skipped for the update commands themselves
+    // so they don't trigger a competing update of their own.
+    if !matches!(cli.command, Commands::Update { .. } | Commands::Autoupdate(_)) {
+        let _ = client::send_command("auto_update_tick", serde_json::json!({})).await;
+    }
+
     match cli.command {
         Commands::Backup { project } => cmd_backup(project, cli.json).await,
         Commands::Status => cmd_status(cli.json).await,

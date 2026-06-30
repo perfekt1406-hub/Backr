@@ -13,11 +13,17 @@ pub mod release;
 pub mod swap;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::error::BackrError;
 use swap::{BinarySwap, ServiceControl};
+
+/// Minimum interval between auto-update release checks, so frequent GUI opens or
+/// CLI runs stay well within the GitHub API rate limit (R17).
+pub const AUTO_CHECK_WINDOW: Duration = Duration::from_secs(6 * 3600);
 
 /// Current-vs-latest version summary surfaced to the update UIs and CLI.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -152,6 +158,47 @@ fn stage_and_apply<S: ServiceControl>(
     progress("Applying update…");
     swap::apply_swap(&swaps, service)?;
     Ok(true)
+}
+
+/// Path to the throttle stamp recording the last auto-update check time.
+fn check_stamp_path() -> Result<PathBuf, BackrError> {
+    let base = dirs::config_dir()
+        .ok_or_else(|| BackrError::Update("could not resolve config directory".into()))?;
+    Ok(base.join("backr").join("last-update-check"))
+}
+
+/// Returns true when no check is recorded or the last one is older than `window`.
+///
+/// Failures to read the stamp are treated as "check is due" so a missing or
+/// corrupt stamp never permanently suppresses auto-update.
+pub fn should_check(window: Duration) -> bool {
+    let path = match check_stamp_path() {
+        Ok(p) => p,
+        Err(_) => return true,
+    };
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let last = match DateTime::parse_from_rfc3339(contents.trim()) {
+        Ok(t) => t.with_timezone(&Utc),
+        Err(_) => return true,
+    };
+    Utc::now()
+        .signed_duration_since(last)
+        .to_std()
+        .map(|elapsed| elapsed >= window)
+        .unwrap_or(true)
+}
+
+/// Records that an auto-update check happened now (best-effort).
+pub fn record_check() {
+    if let Ok(path) = check_stamp_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, Utc::now().to_rfc3339());
+    }
 }
 
 /// Creates a unique staging directory for downloaded assets (runtime dir, else temp).

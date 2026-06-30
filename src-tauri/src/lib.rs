@@ -150,6 +150,14 @@ pub fn run() {
                 }
             });
 
+            // Auto-update tick (fire-and-forget): poke the daemon to consider applying an
+            // update at launch. A no-op when auto-update is off or the throttle window
+            // hasn't elapsed; the daemon runs the check + worker launch in the background,
+            // so this never delays the window opening.
+            tauri::async_runtime::spawn(async {
+                let _ = crate::ipc_client::send("auto_update_tick", serde_json::json!({})).await;
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
