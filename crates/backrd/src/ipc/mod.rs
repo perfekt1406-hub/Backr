@@ -75,15 +75,21 @@ pub async fn handle_connection(
     let fwd_tx = write_tx.clone();
     let forwarder_handle = tokio::spawn(run_event_forwarder(event_rx, fwd_tx));
 
-    // Run the request read-dispatch loop on the current task.
+    // Run the request read-dispatch loop on the current task. On return, the
+    // `write_tx` it owns is dropped.
     run_request_loop(read_half, state, event_tx, write_tx).await;
 
-    // When the reader loop exits (client EOF or error), abort the helpers.
+    // Stop forwarding events; this drops the forwarder's `write_tx` clone.
     forwarder_handle.abort();
-    writer_handle.abort();
+    let _ = forwarder_handle.await;
 
-    // Drain both task results (they were aborted so they finish immediately).
-    let _ = tokio::join!(forwarder_handle, writer_handle);
+    // With every `write_tx` sender now dropped, the writer drains any still-queued
+    // lines — crucially the response to the client's final request — and then exits
+    // on its own. Await it (rather than aborting) so that final reply is actually
+    // flushed before we close the connection. Clients commonly half-close their
+    // write side right after sending, which surfaces here as reader EOF while a
+    // response is still in flight; aborting the writer would drop that response.
+    let _ = writer_handle.await;
 }
 
 // ---------------------------------------------------------------------------
