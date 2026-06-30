@@ -18,7 +18,7 @@ resolver = "2"
 # embedded version against the latest GitHub Release tag (KTD1).
 # ---------------------------------------------------------------------------
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 
 # ---------------------------------------------------------------------------
 # Shared dependency versions
