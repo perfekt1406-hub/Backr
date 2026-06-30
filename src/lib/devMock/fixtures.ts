@@ -12,6 +12,7 @@ import type { FileEntry, SnapshotEntry, SnapshotFileContents } from "../../types
 export function createInitialMockConfig(): Config {
   const last = new Date(Date.now() - 3_600_000).toISOString();
   return {
+    version: 1,
     remote: {
       host: "192.168.1.50",
       user: "backup",
@@ -27,6 +28,9 @@ export function createInitialMockConfig(): Config {
     },
     state: {
       last_backup_at: last,
+    },
+    update: {
+      auto_update: false,
     },
   };
 }

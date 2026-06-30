@@ -20,6 +20,7 @@
   /** Seeds wizard fields until persistence succeeds. */
   function emptyConfig(): Config {
     return {
+      version: 1,
       remote: {
         host: "",
         user: "",
@@ -30,6 +31,7 @@
       local: { projects_path: "" },
       schedule: { interval_hours: 3 },
       state: { last_backup_at: null },
+      update: { auto_update: false },
     };
   }
 

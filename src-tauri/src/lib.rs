@@ -181,6 +181,10 @@ pub fn run() {
             commands::snapshot_cmd::restore_snapshot,
             commands::snapshot_cmd::restore_all_snapshots,
             commands::snapshot_cmd::restore_all_projects,
+            commands::update_cmd::get_update_status,
+            commands::update_cmd::get_update_settings,
+            commands::update_cmd::set_update_settings,
+            commands::update_cmd::apply_update,
             get_daemon_error,
         ])
         .run(tauri::generate_context!())

@@ -14,6 +14,7 @@ pub mod pairing_cmd;
 pub mod project_cmd;
 pub mod snapshot_cmd;
 pub mod system_cmd;
+pub mod update_cmd;
 
 pub use activity_cmd::get_activity_series;
 pub use backup_cmd::{execute_backup_cycle_with_sink, spawn_backup_job};

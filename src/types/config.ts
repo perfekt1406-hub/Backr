@@ -27,10 +27,17 @@ export type StateConfig = {
   last_backup_at: string | null;
 };
 
+/** Update preferences (`[update]`). */
+export type UpdateConfig = {
+  auto_update: boolean;
+};
+
 /** Full persisted configuration document. */
 export type Config = {
+  version: number;
   remote: RemoteConfig;
   local: LocalConfig;
   schedule: ScheduleConfig;
   state: StateConfig;
+  update: UpdateConfig;
 };

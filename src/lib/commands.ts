@@ -18,6 +18,7 @@ import type { AuthorizedPubkeyEntry, HostRemovePubkeyResult, HostTrustAppendResu
 import type { DiscoveredHost, PairDraft, PairingStarted } from "../types/pairing";
 import type { ShellBootstrap } from "../types/shellBootstrap";
 import type { SystemInfo } from "../types/systemInfo";
+import type { UpdateStatus } from "../types/update";
 import * as devMockBackend from "./devMock/backend";
 import { useDevMock } from "./useDevMock";
 
@@ -343,6 +344,57 @@ export async function getActivitySeries(): Promise<ActivityPoint[]> {
     return devMockBackend.mockGetActivitySeries();
   }
   return invoke<ActivityPoint[]>("get_activity_series");
+}
+
+/**
+ * Reports the running version and whether a newer release is available.
+ *
+ * External: `invoke` → `get_update_status` (daemon hits the GitHub Releases API).
+ */
+export async function getUpdateStatus(): Promise<UpdateStatus> {
+  if (useDevMock()) {
+    return { current_version: "0.1.0", latest_version: "0.1.0", update_available: false };
+  }
+  return invoke<UpdateStatus>("get_update_status");
+}
+
+/**
+ * Asks the daemon to apply the latest update. Returns immediately — the daemon
+ * launches an out-of-process worker that swaps binaries and restarts the daemon.
+ *
+ * External: `invoke` → `apply_update`.
+ */
+export async function applyUpdate(): Promise<void> {
+  if (useDevMock()) {
+    return;
+  }
+  await invoke("apply_update");
+}
+
+/**
+ * Returns whether automatic updates are enabled.
+ *
+ * External: `invoke` → `get_update_settings`.
+ */
+export async function getUpdateSettings(): Promise<boolean> {
+  if (useDevMock()) {
+    return false;
+  }
+  const r = await invoke<{ auto_update: boolean }>("get_update_settings");
+  return r.auto_update;
+}
+
+/**
+ * Enables or disables automatic updates; returns the persisted value.
+ *
+ * External: `invoke` → `set_update_settings(auto_update)`.
+ */
+export async function setUpdateSettings(autoUpdate: boolean): Promise<boolean> {
+  if (useDevMock()) {
+    return autoUpdate;
+  }
+  const r = await invoke<{ auto_update: boolean }>("set_update_settings", { autoUpdate });
+  return r.auto_update;
 }
 
 /**

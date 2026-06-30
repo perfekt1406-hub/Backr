@@ -9,6 +9,7 @@
 
   import * as commands from "../../lib/commands";
   import type { Config } from "../../types/config";
+  import type { UpdateStatus } from "../../types/update";
 
   /* ── State ───────────────────────────────────────────────────────────────── */
 
@@ -20,6 +21,12 @@
   let testBusy = $state(false);
   let testResult = $state<{ ok: boolean; msg: string } | null>(null);
 
+  /* Software updates */
+  let updateStatus = $state<UpdateStatus | null>(null);
+  let autoUpdate = $state(false);
+  let updateBusy = $state(false);
+  let updateMsg = $state<string | null>(null);
+
   /* ── Lifecycle ───────────────────────────────────────────────────────────── */
 
   onMount(async () => {
@@ -30,6 +37,14 @@
       }
     } catch (e) {
       loadErr = e instanceof Error ? e.message : String(e);
+    }
+
+    // Update info is best-effort: a slow or failed release check must not block settings.
+    try {
+      updateStatus = await commands.getUpdateStatus();
+      autoUpdate = await commands.getUpdateSettings();
+    } catch {
+      /* leave the version panel without availability info */
     }
   });
 
@@ -68,6 +83,30 @@
       testResult = { ok: false, msg: e instanceof Error ? e.message : String(e) };
     } finally {
       testBusy = false;
+    }
+  }
+
+  /** Triggers an update via the daemon (which relaunches the app after the swap). */
+  async function applyNow(): Promise<void> {
+    updateBusy = true;
+    updateMsg = null;
+    try {
+      await commands.applyUpdate();
+      updateMsg = "Update started — Backr will restart shortly.";
+    } catch (e) {
+      updateMsg = e instanceof Error ? e.message : String(e);
+    } finally {
+      updateBusy = false;
+    }
+  }
+
+  /** Flips the automatic-updates preference and persists it. */
+  async function toggleAuto(): Promise<void> {
+    updateMsg = null;
+    try {
+      autoUpdate = await commands.setUpdateSettings(!autoUpdate);
+    } catch (e) {
+      updateMsg = e instanceof Error ? e.message : String(e);
     }
   }
 </script>
@@ -212,6 +251,57 @@
             <span class="text-[12px] text-[var(--muted2)]">hours between snapshots</span>
           </div>
         </label>
+      </div>
+    </section>
+
+    <!-- ── Software updates section ── -->
+    <section class="overflow-hidden rounded-[10px] border border-[var(--border)] bg-[var(--bg2)] panel-plate">
+      <div class="px-8 pt-7 pb-5">
+        <p class="label-caps mb-1 text-[var(--accent)]">Software updates</p>
+        <h2 class="text-base font-semibold text-[var(--text)]">App version</h2>
+        <p class="mt-1 text-[12px] text-[var(--muted2)]">Update Backr to the latest release. Your connection, schedule, and snapshots are preserved.</p>
+      </div>
+      <div class="mx-8 border-t border-[var(--border)]"></div>
+      <div class="flex flex-col gap-5 bg-[var(--bg3)] px-8 py-6">
+
+        <!-- Current version + availability + Update now -->
+        <div class="flex flex-wrap items-center gap-3">
+          <span class="text-[13px] text-[var(--text)]">
+            Current version
+            <span class="ml-1 font-mono text-[12px] text-[var(--muted)]">{updateStatus?.current_version ?? "—"}</span>
+          </span>
+          {#if updateStatus?.update_available}
+            <span class="rounded-full border border-[var(--accent)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--accent)]">
+              Update available: {updateStatus.latest_version}
+            </span>
+            <button
+              type="button"
+              class="rounded-[6px] bg-[var(--accent)] px-4 py-2 text-[12px] font-semibold uppercase tracking-[0.1em] text-[var(--bg)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+              disabled={updateBusy}
+              onclick={() => void applyNow()}
+            >
+              {updateBusy ? "Updating…" : "Update now"}
+            </button>
+          {:else if updateStatus}
+            <span class="text-[12px] text-[var(--muted2)]">Up to date</span>
+          {/if}
+        </div>
+
+        <!-- Auto-update toggle -->
+        <label class="flex cursor-pointer items-center gap-3">
+          <input
+            type="checkbox"
+            checked={autoUpdate}
+            onchange={() => void toggleAuto()}
+            class="h-4 w-4 accent-[var(--accent)]"
+          />
+          <span class="text-[13px] text-[var(--text)]">Automatic updates</span>
+          <span class="text-[12px] text-[var(--muted2)]">Apply new releases when the app opens or a command runs.</span>
+        </label>
+
+        {#if updateMsg}
+          <span class="text-[12px] text-[var(--muted)]">{updateMsg}</span>
+        {/if}
       </div>
     </section>
 
