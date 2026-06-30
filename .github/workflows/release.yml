@@ -57,7 +57,11 @@ jobs:
         run: cargo build -p backrd -p backr-cli --release
 
       - name: Build desktop app binary
-        run: pnpm tauri build --no-bundle
+        run: |
+          # tauri.conf.json's beforeBuildCommand copies the linuxdeploy gtk plugin
+          # into ~/.cache/tauri; create it so the copy doesn't fail on a fresh runner.
+          mkdir -p "$HOME/.cache/tauri"
+          pnpm tauri build --no-bundle
 
       - name: Stage release assets
         run: |
@@ -88,3 +92,6 @@ jobs:
             dist/backr-app-linux-*
             dist/SHA256SUMS
           generate_release_notes: true
+          # Mark this release as "Latest" so /releases/latest returns it rather than
+          # the pre-existing non-semver v1.0 release that the update client can't parse.
+          make_latest: "true"
