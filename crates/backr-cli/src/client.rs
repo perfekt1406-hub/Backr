@@ -16,6 +16,7 @@
  *   3. `/tmp/backrd.sock` (last-resort fallback)
  */
 
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -238,6 +239,59 @@ pub async fn send_command_stream_progress(method: &str, params: Value) -> Result
 
         return extract_result(obj);
     }
+}
+
+/// Synchronous one-shot IPC call over the daemon socket.
+///
+/// The self-update worker is blocking and runs while it stops and restarts the
+/// daemon, so it cannot use the async client mid-flight. This std-socket variant
+/// keeps the swap path free of the tokio runtime. Skips push events and returns
+/// the response whose `id` matches the request.
+///
+/// # Parameters
+///
+/// - `method` — IPC method name.
+/// - `params` — JSON params object.
+/// - `timeout` — read/write timeout for the call.
+pub fn send_command_blocking(
+    method: &str,
+    params: Value,
+    timeout: std::time::Duration,
+) -> Result<Value> {
+    let path = socket_path();
+    let mut stream = std::os::unix::net::UnixStream::connect(&path)
+        .with_context(|| format!("cannot connect to backrd at {}", path.display()))?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+
+    let id = new_request_id();
+    let request = serde_json::json!({ "id": id, "method": method, "params": params });
+    let mut request_line =
+        serde_json::to_string(&request).context("failed to serialise IPC request")?;
+    request_line.push('\n');
+    stream
+        .write_all(request_line.as_bytes())
+        .context("failed to send IPC request")?;
+    stream.flush().ok();
+
+    let reader = std::io::BufReader::new(stream);
+    for line in reader.lines() {
+        let line = line.context("failed to read IPC response")?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let obj: Value = serde_json::from_str(trimmed).context("daemon sent invalid JSON")?;
+        if obj.get("event").is_some() {
+            continue;
+        }
+        let resp_id = obj.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        if resp_id != id && resp_id != "null" {
+            continue;
+        }
+        return extract_result(obj);
+    }
+    bail!("daemon closed connection without sending a response")
 }
 
 // ---------------------------------------------------------------------------

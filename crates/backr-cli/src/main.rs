@@ -20,6 +20,7 @@
 
 mod client;
 mod output;
+mod update_worker;
 
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
@@ -73,6 +74,19 @@ enum Commands {
 
     /// Manage trusted host public keys (host-only).
     Trust(TrustArgs),
+
+    /// Download, verify, and apply the latest release (or just check with --check).
+    Update {
+        /// Only report whether an update is available; do not apply it.
+        #[arg(long)]
+        check: bool,
+        /// Internal: launched by the daemon; suppresses interactive output.
+        #[arg(long, hide = true)]
+        from_daemon: bool,
+    },
+
+    /// Enable, disable, or show automatic updates.
+    Autoupdate(AutoupdateArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +146,28 @@ enum TrustAction {
 }
 
 // ---------------------------------------------------------------------------
+// Autoupdate subcommand
+// ---------------------------------------------------------------------------
+
+/// Arguments for the `autoupdate` subcommand group.
+#[derive(Args, Debug)]
+struct AutoupdateArgs {
+    #[command(subcommand)]
+    action: AutoupdateAction,
+}
+
+/// Sub-actions under `autoupdate`.
+#[derive(Subcommand, Debug)]
+enum AutoupdateAction {
+    /// Turn automatic updates on.
+    On,
+    /// Turn automatic updates off.
+    Off,
+    /// Show whether automatic updates are enabled.
+    Status,
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -166,7 +202,50 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Pair => cmd_pair(),
         Commands::Snapshots { project } => cmd_snapshots(project, cli.json).await,
         Commands::Trust(args) => cmd_trust(args, cli.json).await,
+        Commands::Update { check, from_daemon } => cmd_update(check, from_daemon, cli.json).await,
+        Commands::Autoupdate(args) => cmd_autoupdate(args, cli.json).await,
     }
+}
+
+/// Runs the self-update worker on a blocking thread (it must keep working while
+/// the daemon is stopped, so it cannot share the async runtime).
+async fn cmd_update(check: bool, from_daemon: bool, json: bool) -> Result<()> {
+    tokio::task::spawn_blocking(move || update_worker::run_update(check, from_daemon, json))
+        .await
+        .map_err(|e| anyhow::anyhow!("update worker task failed: {e}"))?
+}
+
+/// Enables, disables, or shows automatic updates via the daemon settings.
+async fn cmd_autoupdate(args: AutoupdateArgs, json: bool) -> Result<()> {
+    match args.action {
+        AutoupdateAction::On => set_autoupdate(true, json).await,
+        AutoupdateAction::Off => set_autoupdate(false, json).await,
+        AutoupdateAction::Status => {
+            let v = client::send_command("get_update_settings", serde_json::json!({})).await?;
+            if json {
+                println!("{v}");
+            } else {
+                let on = v.get("auto_update").and_then(|b| b.as_bool()).unwrap_or(false);
+                println!("auto-update: {}", if on { "on" } else { "off" });
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Persists the auto-update preference through the daemon.
+async fn set_autoupdate(on: bool, json: bool) -> Result<()> {
+    let v = client::send_command(
+        "set_update_settings",
+        serde_json::json!({ "auto_update": on }),
+    )
+    .await?;
+    if json {
+        println!("{v}");
+    } else {
+        println!("auto-update {}", if on { "enabled" } else { "disabled" });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
