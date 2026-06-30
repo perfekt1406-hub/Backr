@@ -12,6 +12,15 @@ members = [
 resolver = "2"
 
 # ---------------------------------------------------------------------------
+# Shared package metadata
+# The single source of truth for the release version. All workspace members
+# inherit it via `version.workspace = true`, so `backr update` can compare one
+# embedded version against the latest GitHub Release tag (KTD1).
+# ---------------------------------------------------------------------------
+[workspace.package]
+version = "0.1.0"
+
+# ---------------------------------------------------------------------------
 # Shared dependency versions
 # All workspace members that use these deps must reference them as
 # { workspace = true } to keep versions consistent across crates.

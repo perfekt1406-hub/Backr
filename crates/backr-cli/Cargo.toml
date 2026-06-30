@@ -6,7 +6,7 @@
 
 [package]
 name = "backr-cli"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "Backr CLI — talks to the backrd daemon over Unix socket."

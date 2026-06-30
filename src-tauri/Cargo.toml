@@ -4,7 +4,7 @@
 
 [package]
 name = "backr"
-version = "0.1.0"
+version.workspace = true
 description = "Backr desktop backup application (Tauri backend)"
 authors = ["Backr contributors"]
 license = "MIT"

@@ -31,3 +31,16 @@ pub mod pairing;
 pub mod progress_sink;
 pub mod project_snapshot_cache;
 pub mod scheduler;
+
+/// Returns the shared workspace version embedded in this binary at build time.
+///
+/// All three binaries (`backrd`, `backr-app`, `backr`) link this crate and
+/// inherit the single `[workspace.package] version`, so this is the one value
+/// the updater compares against the latest GitHub Release tag.
+///
+/// # Returns
+///
+/// The semantic version string, e.g. `"0.1.0"` (no leading `v`).
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
