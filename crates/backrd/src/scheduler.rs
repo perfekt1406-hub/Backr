@@ -16,6 +16,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::broadcast;
 
@@ -95,17 +96,26 @@ impl BackupTrigger for DaemonBackupTrigger {
 
             /* execute_backup_cycle_with_sink runs the full backup pipeline with rsync progress events. */
             let res = execute_backup_cycle_with_sink(sink, &state, None).await;
-            if let Err(err) = res {
-                tracing::warn!("scheduler: scheduled backup failed: {err}");
-                let _ = tx.send(IpcEvent {
-                    event: "backup_progress".into(),
-                    data: serde_json::json!(format!("[backr] scheduled backup error: {err}")),
-                });
-            } else {
-                // Refresh the system tray tooltip with the new last-backup time.
-                // On non-Linux platforms this call compiles to a no-op.
-                #[cfg(target_os = "linux")]
-                crate::tray::update_label(&state);
+            match res {
+                Err(err) => {
+                    tracing::warn!("scheduler: scheduled backup failed: {err}");
+                    let _ = tx.send(IpcEvent {
+                        event: "backup_progress".into(),
+                        data: serde_json::json!(format!("[backr] scheduled backup error: {err}")),
+                    });
+                    // A failed run leaves `last_backup_at` unchanged, so the only automatic
+                    // recovery would otherwise be the next full-interval tick (hours away) —
+                    // too slow when the host was merely briefly unreachable. Queue a retry.
+                    schedule_retry(&state, &tx);
+                }
+                Ok(()) => {
+                    // Success cancels any queued retry so it no-ops when it fires.
+                    state.retry_pending.store(false, Ordering::SeqCst);
+                    // Refresh the system tray tooltip with the new last-backup time.
+                    // On non-Linux platforms this call compiles to a no-op.
+                    #[cfg(target_os = "linux")]
+                    crate::tray::update_label(&state);
+                }
             }
 
             drop(_clear);
@@ -115,6 +125,50 @@ impl BackupTrigger for DaemonBackupTrigger {
             }
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Failure retry
+// ---------------------------------------------------------------------------
+
+/// How long to wait before re-attempting a backup that failed. A failed scheduled run
+/// (e.g. the host was asleep) does not advance `last_backup_at`, so without this the next
+/// automatic attempt would be a full interval away. One hour balances prompt recovery
+/// against not hammering a host that is genuinely offline.
+const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Queues a single one-shot backup retry `RETRY_INTERVAL` from now.
+///
+/// Single-flight: guarded by `DaemonState::retry_pending` so that repeated failing ticks
+/// (the periodic interval tick plus any earlier retry) can never stack into overlapping
+/// retry chains — at most one retry is ever pending. A backup that succeeds in the
+/// meantime clears the flag, so the queued retry no-ops when it fires.
+///
+/// # Parameters
+/// - `state`    — shared daemon state; owns the `retry_pending` flag and is rebuilt into
+///                a fresh trigger when the retry fires.
+/// - `event_tx` — broadcast sender cloned into the retry's `DaemonBackupTrigger`.
+fn schedule_retry(state: &Arc<DaemonState>, event_tx: &broadcast::Sender<IpcEvent>) {
+    // Claim the single retry slot; if one is already pending, do nothing.
+    if state
+        .retry_pending
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let state = Arc::clone(state);
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(RETRY_INTERVAL).await;
+        // Only fire if still pending — a backup that succeeded meanwhile cleared the flag.
+        if state.retry_pending.swap(false, Ordering::SeqCst) {
+            tracing::info!("scheduler: retrying backup after earlier failure");
+            /* trigger_backup spawns a fresh attempt; re-entering this way avoids async recursion. */
+            DaemonBackupTrigger::new(Arc::clone(&state), event_tx).trigger_backup();
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

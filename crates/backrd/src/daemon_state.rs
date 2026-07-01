@@ -41,6 +41,11 @@ pub struct DaemonState {
     /// `true` while a backup job is actively running; guards against concurrent runs.
     pub in_progress: AtomicBool,
 
+    /// `true` while a one-shot failure retry is already queued. Keeps at most one pending
+    /// retry alive so repeated failing ticks cannot stack into overlapping retry chains
+    /// (see `scheduler::schedule_retry`).
+    pub retry_pending: AtomicBool,
+
     /// Project directory name currently being synced (if any), excluding multi-project runs.
     pub active_project: Mutex<Option<String>>,
 
@@ -65,6 +70,7 @@ impl DaemonState {
         Self {
             config: Mutex::new(None),
             in_progress: AtomicBool::new(false),
+            retry_pending: AtomicBool::new(false),
             active_project: Mutex::new(None),
             last_backup_at: Mutex::new(None),
             scheduler: Arc::new(SchedulerState::new()),
