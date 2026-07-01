@@ -291,7 +291,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "backr"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "backr-core",
  "chrono",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "backr-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "backr-core",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "backr-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "chrono",
  "dirs",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "backrd"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "backr-core",
  "chrono",
