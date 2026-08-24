@@ -37,6 +37,15 @@ curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/
 curl -fsSL https://raw.githubusercontent.com/perfekt1406-hub/Backr/main/scripts/setup-backup-host.sh | sudo bash -s -- --no-appimage --verbose
 ```
 
+> **Give the host a fixed IP before pairing.** Clients remember the host by IP address, so a later DHCP lease change silently strands backups. Pick whichever you prefer:
+>
+> - **Router DHCP reservation (recommended):** in your router's admin page, bind the host's MAC address to a fixed IP (usually under "Address Reservation", "Static Leases", or "DHCP Binding"). No host configuration needed.
+> - **Static IP on the host:** set a manual address in the host's network manager, e.g. with NetworkManager:
+>   `sudo nmcli con mod "<connection>" ipv4.method manual ipv4.addresses 192.168.1.42/24 ipv4.gateway 192.168.1.1 ipv4.dns 192.168.1.1 && sudo nmcli con up "<connection>"` —
+>   then exclude that address from the router's DHCP pool so it can't be handed to another device.
+>
+> Already paired and the host's IP changed anyway? Pin the host back to its **old** address with either method and the connection restores itself with no reconfiguration; otherwise update the host address in the app's settings.
+
 ---
 
 ### 2. Laptop
@@ -64,7 +73,7 @@ git clone https://github.com/perfekt1406-hub/Backr.git && cd Backr
 
 On first launch Backr **scans the LAN for your host** (in pairing mode), you pick it and enter the **6-digit code**, and it generates your SSH key, gets it trusted on the host, pins the host key, and prefills the rest — no IP typing or key copying. If the host isn't found (some networks block mDNS), choose **Enter details manually** in the wizard.
 
-> **Re-running reinstalls cleanly:** running the script again wipes the previous binary and config so the app opens in pairing mode, then rebuilds from the latest source.
+> **Re-running preserves your setup:** running the script again rebuilds from the latest source but keeps `~/.config/backr` (pairing, schedule, trusted host keys). Pass `--fresh` (or `BACKR_FRESH=1`) to wipe the config for a clean-slate install that opens in pairing mode.
 >
 > **Uninstall (laptop):** `./scripts/setup-connecting-client.sh --uninstall` removes the app, launcher entry, and icons (keeps your SSH keys and toolchain).
 
@@ -117,7 +126,10 @@ Bundles land in `src-tauri/target/release/bundle/`.
 | Path | Role |
 |------|------|
 | `src/` | Svelte 5 UI — routes, stores, components. |
-| `src-tauri/` | Rust — config, scheduler, rsync/SSH, Tauri commands. |
+| `src-tauri/` | Tauri GUI shell (`backr-app`) — thin client of the daemon. |
+| `crates/backrd/` | Background daemon — scheduler, SSH/rsync backups, IPC server. |
+| `crates/backr-cli/` | `backr` CLI — talks to the same daemon. |
+| `crates/backr-core/` | Shared core library (backup, pairing, config, updates). |
 | `scripts/` | `setup-backup-host.sh` and `setup-connecting-client.sh`. |
 
 ---
