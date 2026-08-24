@@ -18,7 +18,7 @@ use backr_core::config::Config;
 use backr_core::error::BackrCommandError;
 use backr_core::pairing::code::PairingSession;
 use backr_core::pairing::{PairingRuntime, listener::{PairingStateAccess, PairRequest, HostPairInfo, PairRejection, process_pair}};
-use backr_core::host_trust::host_append_authorized_pubkey_impl;
+use backr_core::host_trust::append_pubkey_for_pairing;
 
 /// Shared application state injected into the Tauri runtime via `tauri::Manager::manage`.
 pub struct AppState {
@@ -119,17 +119,8 @@ impl PairingStateAccess for AppState {
         let Some(session) = guard.as_mut() else {
             return Err(None);
         };
-        process_pair(session, req, host, |line| {
-            let r = host_append_authorized_pubkey_impl(line.to_string())
-                .map_err(|e| e)?;
-            // appended=false + skipped_duplicate=false means the host process doesn't own
-            // authorized_keys — the sudo fallback path returned Ok but wrote nothing.
-            if r.appended || r.skipped_duplicate {
-                Ok(())
-            } else {
-                Err("host cannot write authorized_keys — run the sudo snippet from the Trust keys UI".to_string())
-            }
-        }).map_err(Some)
+        /* append_pubkey_for_pairing appends the pubkey line, hard-failing when this process cannot write authorized_keys. */
+        process_pair(session, req, host, append_pubkey_for_pairing).map_err(Some)
     }
 
     /// Clears the active pairing session slot.

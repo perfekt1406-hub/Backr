@@ -34,6 +34,13 @@ pub struct PairingSession {
     consumed: bool,
 }
 
+impl Default for PairingSession {
+    /// Equivalent to [`PairingSession::new`]: a fresh session with a random code.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PairingSession {
     /// Creates a fresh session with a random 6-digit code.
     pub fn new() -> Self {

@@ -146,7 +146,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 ///
 /// # Parameters
 /// - `state`    — shared daemon state; owns the `retry_pending` flag and is rebuilt into
-///                a fresh trigger when the retry fires.
+///   a fresh trigger when the retry fires.
 /// - `event_tx` — broadcast sender cloned into the retry's `DaemonBackupTrigger`.
 fn schedule_retry(state: &Arc<DaemonState>, event_tx: &broadcast::Sender<IpcEvent>) {
     // Claim the single retry slot; if one is already pending, do nothing.
@@ -184,9 +184,9 @@ fn schedule_retry(state: &Arc<DaemonState>, event_tx: &broadcast::Sender<IpcEven
 ///
 /// # Parameters
 /// - `state`    — Shared daemon state; used to read the current config and to
-///                build the `DaemonBackupTrigger`.
+///   build the `DaemonBackupTrigger`.
 /// - `event_tx` — Broadcast sender wired into the `DaemonBackupTrigger` so backup
-///                tasks can push progress events to connected clients.
+///   tasks can push progress events to connected clients.
 pub async fn start_scheduler_if_configured(
     state: Arc<DaemonState>,
     event_tx: broadcast::Sender<IpcEvent>,

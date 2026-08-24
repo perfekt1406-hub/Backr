@@ -91,7 +91,7 @@ pub fn asset_name(bin: &str, arch: &str) -> String {
 pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     let t = s.trim();
     let t = t.strip_prefix('v').unwrap_or(t);
-    let core = t.split(|c| c == '-' || c == '+').next().unwrap_or(t);
+    let core = t.split(['-', '+']).next().unwrap_or(t);
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;

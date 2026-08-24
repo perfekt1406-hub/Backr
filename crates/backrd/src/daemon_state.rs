@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 
 use backr_core::config::Config;
 use backr_core::error::BackrCommandError;
-use backr_core::host_trust::host_append_authorized_pubkey_impl;
+use backr_core::host_trust::append_pubkey_for_pairing;
 use backr_core::pairing::code::PairingSession;
 use backr_core::pairing::listener::{
     process_pair, HostPairInfo, PairRejection, PairRequest, PairingStateAccess,
@@ -153,22 +153,8 @@ impl PairingStateAccess for DaemonState {
             return Err(None);
         };
         /* process_pair validates the pubkey, consumes the code, appends to authorized_keys, and returns HostPairInfo. */
-        process_pair(session, req, host, |line| {
-            /* host_append_authorized_pubkey_impl validates and appends one pubkey line to authorized_keys. */
-            let r = host_append_authorized_pubkey_impl(line.to_string())
-                .map_err(|e| e)?;
-            // appended=false + skipped_duplicate=false means the daemon process cannot own
-            // authorized_keys — the sudo fallback path returned Ok but wrote nothing.
-            if r.appended || r.skipped_duplicate {
-                Ok(())
-            } else {
-                Err(
-                    "daemon cannot write authorized_keys — run the sudo snippet from the Trust keys UI"
-                        .to_string(),
-                )
-            }
-        })
-        .map_err(Some)
+        /* append_pubkey_for_pairing appends the pubkey line, hard-failing when this process cannot write authorized_keys. */
+        process_pair(session, req, host, append_pubkey_for_pairing).map_err(Some)
     }
 
     /// Clears the active pairing session slot (sets it to `None`).

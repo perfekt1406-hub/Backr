@@ -385,6 +385,18 @@ fn count_existing(ak_path: &Path) -> usize {
     count_trusted_keys_impl(ak_path)
 }
 
+/// Pairing append callback shared by `backrd` and the host-mode GUI (both hand it to
+/// `pairing::listener::process_pair`). Appends the pubkey line and treats the
+/// sudo-fallback soft-success (nothing written, nothing skipped) as a hard error,
+/// since a pair request needs a definitive success or rejection.
+pub fn append_pubkey_for_pairing(line: &str) -> Result<(), String> {
+    let r = host_append_authorized_pubkey_impl(line.to_string())?;
+    if r.appended || r.skipped_duplicate {
+        return Ok(());
+    }
+    Err("host cannot write authorized_keys — run the sudo snippet from the Trust keys UI".into())
+}
+
 /// One parsed entry from `authorized_keys`, suitable for the host Settings key list.
 #[derive(Debug, Serialize, serde::Deserialize)]
 pub struct AuthorizedPubkeyEntry {

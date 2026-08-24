@@ -140,9 +140,7 @@ async fn command_output(mut cmd: Command) -> Result<std::process::Output, BackrE
         // from accept-new, not the error, so skip it.
         let detail = stderr
             .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with("Warning: Permanently added"))
-            .next_back()
+            .map(str::trim).rfind(|l| !l.is_empty() && !l.starts_with("Warning: Permanently added"))
             .unwrap_or("no SSH error output");
         return Err(BackrError::Remote(format!(
             "SSH command failed — check host connectivity and SSH key trust ({detail})"
@@ -603,7 +601,7 @@ mod tests {
     #[test]
     fn ssh_command_contains_controlmaster_options() {
         let known = PathBuf::from("/tmp/fake_known_hosts");
-        let mut cmd = ssh_base_command_for_host("/tmp/id_ed25519", &known, true, 22, "backup.example.com");
+        let cmd = ssh_base_command_for_host("/tmp/id_ed25519", &known, true, 22, "backup.example.com");
         // `as_std` exposes the underlying std Command so we can inspect its args.
         let args: Vec<_> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         let args_flat = args.join(" ");

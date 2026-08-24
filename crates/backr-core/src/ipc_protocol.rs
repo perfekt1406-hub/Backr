@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Fields:
 /// - `id`     — Caller-generated string id; echoed verbatim in the response so the
-///              caller can correlate replies. MUST be a JSON string on the wire.
+///   caller can correlate replies. MUST be a JSON string on the wire.
 /// - `method` — Handler name (e.g. `"ping"`, `"resolve_shell_bootstrap"`).
 /// - `params` — Arbitrary JSON object; may be `{}` when no parameters are needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]

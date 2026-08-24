@@ -32,9 +32,6 @@ export type ErrorKind =
   | "Pairing"
   | "TaskFailed";
 
-/** Alias kept for compatibility with code that imports `BackrErrorKind`. */
-export type BackrErrorKind = ErrorKind;
-
 /**
  * Typed error returned from every Tauri command when the result is `Err`.
  *

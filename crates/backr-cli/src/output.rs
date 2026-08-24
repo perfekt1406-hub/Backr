@@ -109,7 +109,7 @@ pub fn print_projects(result: &Value, json: bool) {
         println!("No projects found.");
         return;
     }
-    println!("{:<30} {:>10}  {}", "Project", "Snapshots", "Last backup");
+    println!("{:<30} {:>10}  Last backup", "Project", "Snapshots");
     println!("{}", "-".repeat(60));
     for p in projects {
         let name = str_field(p, "name", "<unknown>");

@@ -128,9 +128,9 @@ mod inner {
     ///
     /// # Parameters
     /// - `state`    — Shared daemon state; read for the initial tooltip label
-    ///                and passed into the backup trigger.
+    ///   and passed into the backup trigger.
     /// - `event_tx` — IPC broadcast sender forwarded to the backup trigger so
-    ///                manual backup tasks can push progress events to clients.
+    ///   manual backup tasks can push progress events to clients.
     pub fn spawn_tray(state: Arc<DaemonState>, event_tx: broadcast::Sender<IpcEvent>) {
         // Unbounded channel: ksni menu callback → Tokio backup listener task.
         let (backup_tx, mut backup_rx) = mpsc::unbounded_channel::<()>();
@@ -175,7 +175,7 @@ mod inner {
     ///
     /// # Parameters
     /// - `state` — Shared daemon state; `last_backup_at` is read to format the
-    ///             new label string.
+    ///   new label string.
     pub fn update_label(state: &DaemonState) {
         let label = format_label(state);
         let guard = TRAY_HANDLE.lock().expect("tray handle mutex poisoned");

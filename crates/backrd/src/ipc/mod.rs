@@ -52,9 +52,9 @@ use crate::ipc::protocol::{IpcError, IpcEvent, IpcRequest, IpcResponse};
 /// - `stream`   — The accepted Unix domain socket stream.
 /// - `state`    — Shared daemon state passed into each handler.
 /// - `event_tx` — Broadcast sender; handlers that produce progress events (backup,
-///                restore) clone this to construct an `IpcBroadcastSink`.
+///   restore) clone this to construct an `IpcBroadcastSink`.
 /// - `event_rx` — Subscription to the daemon-wide `IpcEvent` broadcast channel;
-///                events received here are forwarded to this connection's socket.
+///   events received here are forwarded to this connection's socket.
 pub async fn handle_connection(
     stream: UnixStream,
     state: Arc<DaemonState>,

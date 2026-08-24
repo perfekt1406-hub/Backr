@@ -69,19 +69,6 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-/**
- * Resets mutable mock state — reserved for tests or future debug controls.
- *
- * External: mutates module-level configuration clones only.
- */
-export function resetDevMockState(): void {
-  mockConfig = structuredClone(createInitialMockConfig());
-  backupRunning = false;
-  activeProject = null;
-  activityHistory = [...seedActivityPoints()];
-  mockTrustPubkeyLineCount = 0;
-}
-
 /** Returns optional persisted config — mock mode always supplies a concrete document. */
 export function mockGetConfig(): Config | null {
   return structuredClone(mockConfig);

@@ -31,7 +31,7 @@ impl IpcBroadcastSink {
     ///
     /// # Parameters
     /// - `sender` — Shared broadcast sender; typically cloned from the channel
-    ///              created in `main` before the accept loop starts.
+    ///   created in `main` before the accept loop starts.
     pub fn new(sender: broadcast::Sender<IpcEvent>) -> Self {
         Self { sender }
     }
